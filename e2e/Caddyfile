@@ -8,7 +8,7 @@
         issuer_url http://oidc-provider/example
         client_id xyz
         redirect_uri http://caddy/oauth/callback
-        secret_key VTQOz22ZZiyYNciwtDyckU1aJWQSCXnm
+        secret_key {env.OIDC_SECRET_KEY}
         cookie {
             insecure
         }

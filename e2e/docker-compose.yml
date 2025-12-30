@@ -4,7 +4,7 @@ services:
     volumes:
       - ./dex.yaml:/etc/dex/cfg/config.yaml
     command: dex serve /etc/dex/cfg/config.yaml
-  
+
   caddy:
     build:
       context: ../
@@ -12,6 +12,8 @@ services:
     image: local/caddy-oauth
     depends_on:
       - oidc-provider
+    environment:
+      OIDC_SECRET_KEY: VTQOz22ZZiyYNciwtDyckU1aJWQSCXnm
 
   test:
     build:

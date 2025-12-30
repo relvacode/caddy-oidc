@@ -135,6 +135,10 @@ func (m *OIDCProviderModule) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("invalid redirect_uri: %w", err)
 	}
 
+	var repl = caddy.NewReplacer()
+
+	m.SecretKey = repl.ReplaceAll(m.SecretKey, "")
+
 	if l := len(m.SecretKey); l != 32 && l != 64 {
 		return fmt.Errorf("secret_key must be 32 or 64 bytes, got %d", l)
 	}
