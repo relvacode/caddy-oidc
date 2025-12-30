@@ -1,7 +1,10 @@
 package caddy_oauth2_proxy_auth
 
 import (
+	"bytes"
+	"fmt"
 	"net/http"
+	"net/netip"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 )
@@ -67,9 +70,42 @@ ptn:
 	return iv == len(s) && iw == len(w)
 }
 
+type IpRange struct {
+	netip.Prefix
+}
+
+func (ir *IpRange) UnmarshalText(text []byte) error {
+	i := bytes.LastIndex(text, []byte("/"))
+	if i < 0 {
+		// No prefix specified, expect an IP address, with the range equal to the length of the IP bits
+		ip, err := netip.ParseAddr(string(text))
+		if err != nil {
+			return err
+		}
+
+		ir.Prefix = netip.PrefixFrom(ip, ip.BitLen())
+
+		return nil
+	}
+
+	pr, err := netip.ParsePrefix(string(text))
+	if err != nil {
+		return err
+	}
+
+	ir.Prefix = pr.Masked() // Mask original IP to range
+
+	return nil
+}
+
+func (ir *IpRange) MarshalText() ([]byte, error) {
+	return []byte(ir.Prefix.String()), nil
+}
+
 type RequestMatcher struct {
 	Anonymous bool       `json:"anonymous,omitempty"`
 	User      []Wildcard `json:"user,omitempty"`
+	Client    []IpRange  `json:"client,omitempty"`
 }
 
 func (p *RequestMatcher) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
@@ -81,6 +117,16 @@ func (p *RequestMatcher) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			for _, arg := range d.RemainingArgs() {
 				p.User = append(p.User, Wildcard(arg))
 			}
+		case "client":
+			for _, arg := range d.RemainingArgs() {
+				var ir IpRange
+				err := ir.UnmarshalText([]byte(arg))
+				if err != nil {
+					return fmt.Errorf("invalid IP or IP range: %w", err)
+				}
+
+				p.Client = append(p.Client, ir)
+			}
 		}
 	}
 
@@ -89,9 +135,9 @@ func (p *RequestMatcher) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 
 // Evaluate evaluates the policy and returns true if the request is allowed.
 // An empty policy always returns true.
-func (p *RequestMatcher) Evaluate(_ *http.Request, s *Session) bool {
+func (p *RequestMatcher) Evaluate(r *http.Request, s *Session) (bool, error) {
 	if p.Anonymous != s.Anonymous {
-		return false
+		return false, nil
 	}
 
 	if len(p.User) > 0 {
@@ -104,11 +150,30 @@ func (p *RequestMatcher) Evaluate(_ *http.Request, s *Session) bool {
 		}
 
 		if !hasUser {
-			return false
+			return false, nil
 		}
 	}
 
-	return true
+	if len(p.Client) > 0 {
+		client, err := ClientIP(r)
+		if err != nil {
+			return false, err
+		}
+
+		var hasClient = false
+		for _, ir := range p.Client {
+			if ir.Contains(client) {
+				hasClient = true
+				break
+			}
+		}
+
+		if !hasClient {
+			return false, nil
+		}
+	}
+
+	return true, nil
 }
 
 type Policy struct {
@@ -153,23 +218,28 @@ func (ps *PolicySet) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 // If at least one Allow policy is found, then the evaluation result is Permit.
 // If at least one Deny policy is found, then the evaluation result is RejectExplicit.
 // Otherwise, the evaluation result is RejectImplicit.
-func (ps *PolicySet) Evaluate(r *http.Request, s *Session) Evaluation {
+func (ps *PolicySet) Evaluate(r *http.Request, s *Session) (Evaluation, error) {
 	var isAllowed = false
 
 	for _, p := range *ps {
-		if p.Evaluate(r, s) {
+		ok, err := p.Evaluate(r, s)
+		if err != nil {
+			return 0, err
+		}
+
+		if ok {
 			switch p.Action {
 			case Allow:
 				isAllowed = true
 			case Deny:
-				return RejectExplicit
+				return RejectExplicit, nil
 			}
 		}
 	}
 
 	if isAllowed {
-		return Permit
+		return Permit, nil
 	}
 
-	return RejectImplicit
+	return RejectImplicit, nil
 }

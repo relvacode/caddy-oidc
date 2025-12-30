@@ -20,7 +20,7 @@ http:// {
 
     oidc example {
         allow {
-            # An empty allow block is equivalent to match any valid non-anonymous user.
+            # An empty allow block is equivalent to match any valid non-anonymous user from any client.
         }
     }
 

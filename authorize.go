@@ -291,7 +291,12 @@ func (d *OIDCAuthorizer) ServeHTTP(rw http.ResponseWriter, r *http.Request, next
 		return err
 	}
 
-	switch d.Policies.Evaluate(r, s) {
+	e, err := d.Policies.Evaluate(r, s)
+	if err != nil {
+		return err
+	}
+
+	switch e {
 	case Permit:
 		return next.ServeHTTP(rw, r)
 	case RejectExplicit:

@@ -1,10 +1,13 @@
 package caddy_oauth2_proxy_auth
 
 import (
+	"context"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -58,6 +61,19 @@ func TestRequestMatcher_UnmarshalCaddyfile(t *testing.T) {
 			}`,
 			expect: RequestMatcher{
 				User: []Wildcard{"a", "b", "c"},
+			},
+		},
+		{
+			name: "clients",
+			input: `{
+				client 192.168.0.1/24 10.0.0.0/8 1.1.1.1
+			}`,
+			expect: RequestMatcher{
+				Client: []IpRange{
+					{Prefix: netip.MustParsePrefix("192.168.0.0/24")},
+					{Prefix: netip.MustParsePrefix("10.0.0.0/8")},
+					{Prefix: netip.MustParsePrefix("1.1.1.1/32")},
+				},
 			},
 		},
 	}
@@ -140,6 +156,31 @@ func TestPolicySet_Evaluate(t *testing.T) {
 			},
 			expect: Permit,
 		},
+		{
+			name: "deny client",
+			input: `{
+				deny {
+					client 127.0.0.1/32
+				}
+			}`,
+			session: &Session{
+				Uid: "test@example.com",
+			},
+			expect: RejectExplicit,
+		},
+		{
+			name: "allow multiple and",
+			input: `{
+				allow {
+					user test@example.com
+					client 127.0.0.1/32
+				}
+			}`,
+			session: &Session{
+				Uid: "test@example.com",
+			},
+			expect: Permit,
+		},
 	}
 
 	for _, tt := range tests {
@@ -152,7 +193,13 @@ func TestPolicySet_Evaluate(t *testing.T) {
 			assert.NoError(t, err)
 
 			r := httptest.NewRequest("GET", "/", nil)
-			assert.Equal(t, tt.expect, ps.Evaluate(r, tt.session))
+			r = r.WithContext(context.WithValue(r.Context(), caddyhttp.VarsCtxKey, map[string]any{
+				caddyhttp.ClientIPVarKey: "127.0.0.1",
+			}))
+
+			e, err := ps.Evaluate(r, tt.session)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expect, e)
 		})
 	}
 }
