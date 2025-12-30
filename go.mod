@@ -1,4 +1,4 @@
-module github.com/relvacode/caddy-oauth2-proxy-auth
+module github.com/relvacode/caddy-oidc
 
 go 1.25.5
 

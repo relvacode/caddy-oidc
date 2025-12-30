@@ -1,4 +1,4 @@
-package caddy_oauth2_proxy_auth
+package caddy_oidc
 
 import (
 	"fmt"

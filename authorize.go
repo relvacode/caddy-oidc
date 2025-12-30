@@ -1,4 +1,4 @@
-package caddy_oauth2_proxy_auth
+package caddy_oidc
 
 import (
 	"errors"
@@ -14,10 +14,6 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/oauth2"
 )
-
-// TODO validation
-// TODO bypass client ip (can it be done in caddy natively?)
-// TODO validate policy
 
 func init() {
 	caddy.RegisterModule(new(OIDCAuthorizer))
