@@ -18,11 +18,15 @@ func init() {
 }
 
 func parseGlobalConfig(d *caddyfile.Dispenser, prev any) (any, error) {
-	app, ok := prev.(*App)
-	if !ok {
-		app = &App{
-			Providers: make(map[string]*OIDCProviderModule),
-		}
+	var app *App
+
+	switch prev := prev.(type) {
+	case *App:
+		app = prev
+	case nil:
+		app = &App{Providers: make(map[string]*OIDCProviderModule)}
+	default:
+		return nil, fmt.Errorf("conflicting global parser option for the oidc directive: %T", prev)
 	}
 
 	for d.Next() {
@@ -62,6 +66,7 @@ func parseCaddyfileHandler[T any, Ptr interface {
 
 var _ caddy.App = (*App)(nil)
 var _ caddy.Module = (*App)(nil)
+var _ caddy.Validator = (*App)(nil)
 var _ caddy.Provisioner = (*App)(nil)
 
 type App struct {
@@ -83,6 +88,11 @@ func (a *App) Provision(ctx caddy.Context) error {
 	a.providers = make(map[string]*Authenticator, len(a.Providers))
 
 	for k, p := range a.Providers {
+		err := p.Provision(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to provision oidc provider '%s': %w", k, err)
+		}
+
 		au, err := p.CreateAuthorizer(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to create oidc provider '%s': %w", k, err)
@@ -91,5 +101,14 @@ func (a *App) Provision(ctx caddy.Context) error {
 		a.providers[k] = au
 	}
 
+	return nil
+}
+
+func (a *App) Validate() error {
+	for k, p := range a.Providers {
+		if err := p.Validate(); err != nil {
+			return fmt.Errorf("oidc provider '%s' validation failed: %w", k, err)
+		}
+	}
 	return nil
 }

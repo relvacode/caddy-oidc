@@ -45,10 +45,12 @@ func TestOIDCProvider_UnmarshalCaddyfile(t *testing.T) {
 		{
 			name: "full configuration",
 			input: `{
-				issuer_url http://openid/example
+				issuer http://openid/example
 				client_id xyz
 				redirect_uri http://localhost/oauth/callback
 				secret_key 7DFSrbya1rvBBmcaxD
+				tls_insecure_skip_verify
+				discovery_url http://openid/.well-known/openid-configuration
 				cookie {
 					name session_id
 					same_site strict
@@ -57,10 +59,12 @@ func TestOIDCProvider_UnmarshalCaddyfile(t *testing.T) {
 			}`,
 			shouldErr: false,
 			expect: &OIDCProviderModule{
-				IssuerURL:   "http://openid/example",
-				ClientID:    "xyz",
-				RedirectURI: "http://localhost/oauth/callback",
-				SecretKey:   "7DFSrbya1rvBBmcaxD",
+				Issuer:                "http://openid/example",
+				ClientID:              "xyz",
+				RedirectURI:           "http://localhost/oauth/callback",
+				SecretKey:             "7DFSrbya1rvBBmcaxD",
+				TLSInsecureSkipVerify: true,
+				DiscoveryURL:          "http://openid/.well-known/openid-configuration",
 				Cookie: &Cookies{
 					Name:     "session_id",
 					SameSite: http.SameSiteStrictMode,

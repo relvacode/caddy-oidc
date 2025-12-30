@@ -5,7 +5,7 @@
     }
 
     oidc example {
-        issuer_url http://oidc-provider/example
+        issuer http://oidc-provider/example
         client_id xyz
         redirect_uri http://caddy/oauth/callback
         secret_key {env.OIDC_SECRET_KEY}

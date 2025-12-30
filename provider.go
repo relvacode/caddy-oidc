@@ -1,12 +1,13 @@
 package caddy_oidc
 
 import (
-	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -24,16 +25,19 @@ func init() {
 }
 
 var _ caddy.Module = (*OIDCProviderModule)(nil)
+var _ caddy.Provisioner = (*OIDCProviderModule)(nil)
+var _ caddy.Validator = (*OIDCProviderModule)(nil)
 var _ caddyfile.Unmarshaler = (*OIDCProviderModule)(nil)
 
 // OIDCProviderModule holds the configuration for an OIDC provider
 type OIDCProviderModule struct {
-	IssuerURL             string   `json:"issuer_url"`
+	Issuer                string   `json:"issuer"`
 	ClientID              string   `json:"client_id"`
 	SecretKey             string   `json:"secret_key"`
 	RedirectURI           string   `json:"redirect_uri"`
-	Cookie                *Cookies `json:"cookie"`
 	TLSInsecureSkipVerify bool     `json:"tls_insecure_skip_verify"`
+	DiscoveryURL          string   `json:"discovery_url,omitempty"`
+	Cookie                *Cookies `json:"cookie"`
 }
 
 func (*OIDCProviderModule) CaddyModule() caddy.ModuleInfo {
@@ -46,11 +50,12 @@ func (*OIDCProviderModule) CaddyModule() caddy.ModuleInfo {
 // UnmarshalCaddyfile sets up the OIDCProviderModule instance from Caddyfile tokens.
 /*
 {
-	issuer_url <issuer_url>
+	issuer <issuer>
 	client_id <client_id>
 	redirect_uri <redirect_uri>
 	secret_key <secret_key>
 	tls_insecure_skip_verify
+	discovery_url <discovery_url>
 	cookie <name> | {
 		name <name>
 		same_site <same_site>
@@ -63,11 +68,11 @@ func (*OIDCProviderModule) CaddyModule() caddy.ModuleInfo {
 func (m *OIDCProviderModule) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for nesting := d.Nesting(); d.NextBlock(nesting); {
 		switch d.Val() {
-		case "issuer_url":
+		case "issuer":
 			if !d.NextArg() {
 				return d.ArgErr()
 			}
-			m.IssuerURL = d.Val()
+			m.Issuer = d.Val()
 		case "client_id":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -91,6 +96,11 @@ func (m *OIDCProviderModule) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 		case "tls_insecure_skip_verify":
 			m.TLSInsecureSkipVerify = true
+		case "discovery_url":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			m.DiscoveryURL = d.Val()
 		default:
 			return d.Errf("unrecognized subdirective '%s'", d.Val())
 		}
@@ -100,19 +110,48 @@ func (m *OIDCProviderModule) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	return nil
 }
 
+func (m *OIDCProviderModule) Provision(_ caddy.Context) error {
+	var repl = caddy.NewReplacer()
+	m.SecretKey = repl.ReplaceAll(m.SecretKey, "")
+
+	if m.DiscoveryURL == "" {
+		m.DiscoveryURL = strings.TrimSuffix(m.Issuer, "/") + "/.well-known/openid-configuration"
+	}
+
+	if m.Cookie == nil {
+		m.Cookie = new(Cookies)
+		*m.Cookie = DefaultCookieOptions
+	}
+
+	return nil
+}
+
+func (m *OIDCProviderModule) Validate() error {
+	if m.Issuer == "" {
+		return errors.New("issuer cannot be empty")
+	}
+	if m.ClientID == "" {
+		return errors.New("client_id cannot be empty")
+	}
+	if m.SecretKey == "" {
+		return errors.New("secret_key cannot be empty")
+	}
+	if len(m.SecretKey) != 32 && len(m.SecretKey) != 64 {
+		return errors.New("secret_key must be 32 or 64 bytes")
+	}
+
+	if err := m.Cookie.Validate(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // CreateAuthorizer creates an Authenticator instance from this provider configuration.
 func (m *OIDCProviderModule) CreateAuthorizer(ctx caddy.Context) (*Authenticator, error) {
 	redirectUri, err := url.Parse(m.RedirectURI)
 	if err != nil {
 		return nil, fmt.Errorf("invalid redirect_uri: %w", err)
-	}
-
-	var repl = caddy.NewReplacer()
-
-	m.SecretKey = repl.ReplaceAll(m.SecretKey, "")
-
-	if l := len(m.SecretKey); l != 32 && l != 64 {
-		return nil, fmt.Errorf("secret_key must be 32 or 64 bytes, got %d", l)
 	}
 
 	log := ctx.Logger(m)
@@ -145,15 +184,9 @@ func (m *OIDCProviderModule) CreateAuthorizer(ctx caddy.Context) (*Authenticator
 		cookie:      m.Cookie,
 	}
 
-	if authorizer.cookie == nil {
-		authorizer.cookie = new(Cookies)
-		*authorizer.cookie = DefaultCookieOptions
-	}
-
 	authorizer.log.Debug("performing OIDC discovery")
 
-	providerCtx := context.WithValue(ctx.Context, oauth2.HTTPClient, authorizer.httpClient)
-	provider, err := oidc.NewProvider(providerCtx, m.IssuerURL)
+	provider, err := Discover(ctx, authorizer.httpClient, m.DiscoveryURL)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery failed: %w", err)
 	}
