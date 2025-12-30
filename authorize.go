@@ -35,6 +35,7 @@ type CSRFToken struct {
 
 var _ caddy.Module = (*OIDCAuthorizer)(nil)
 var _ caddy.Provisioner = (*OIDCAuthorizer)(nil)
+var _ caddy.Validator = (*OIDCAuthorizer)(nil)
 var _ caddyfile.Unmarshaler = (*OIDCAuthorizer)(nil)
 var _ caddyhttp.MiddlewareHandler = (*OIDCAuthorizer)(nil)
 
@@ -92,6 +93,18 @@ func (d *OIDCAuthorizer) Provision(ctx caddy.Context) error {
 	}
 
 	d.m = p.data
+
+	return nil
+}
+
+func (d *OIDCAuthorizer) Validate() error {
+	if len(d.Policies) == 0 {
+		return errors.New("at least one policy must be specified")
+	}
+
+	if !d.Policies.ContainsAllow() {
+		return errors.New("no authorization policy is configured to allow access, all requests will be denied without at least one allow policy")
+	}
 
 	return nil
 }
@@ -208,8 +221,6 @@ func (d *OIDCAuthorizer) StartAuthorization(w http.ResponseWriter, r *http.Reque
 }
 
 func (d *OIDCAuthorizer) HandleOauthCallback(w http.ResponseWriter, r *http.Request, _ caddyhttp.Handler) error {
-	d.m.log.Info("Handling OAuth callback")
-
 	if errValue := r.FormValue("error"); errValue != "" {
 		return caddyhttp.Error(http.StatusBadRequest, fmt.Errorf("error: %s, description: %s", errValue, r.FormValue("error_description")))
 	}
@@ -279,10 +290,8 @@ func (d *OIDCAuthorizer) HandleOauthCallback(w http.ResponseWriter, r *http.Requ
 }
 
 func (d *OIDCAuthorizer) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	caddy.Log().Info("OIDCAuthorizer handling request")
-
 	// Check if the request is an OAuth callback
-	if r.Method == http.MethodGet && r.URL.Path == d.m.redirectUriPath {
+	if r.Method == http.MethodGet && r.URL.Path == d.m.redirectUri.Path {
 		return d.HandleOauthCallback(rw, r, next)
 	}
 

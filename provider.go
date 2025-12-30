@@ -2,6 +2,7 @@ package caddy_oauth2_proxy_auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -21,22 +22,38 @@ func init() {
 	caddy.RegisterModule(new(OIDCProviderModule))
 }
 
-// TODO validate:
-// 	- secret_key is 32 or 64 bytes
-//  - redirect_url is valid and fully qualified
+var _ caddy.Validator = (*OIDCProvider)(nil)
 
 type OIDCProvider struct {
-	log             *zap.Logger
-	redirectUriPath string
-	clock           func() time.Time
-	verifier        *oidc.IDTokenVerifier
-	oauth2          *oauth2.Config
-	cookie          *Cookies
-	cookies         *securecookie.SecureCookie
+	log         *zap.Logger
+	redirectUri *url.URL
+	clock       func() time.Time
+	verifier    *oidc.IDTokenVerifier
+	oauth2      *oauth2.Config
+	cookie      *Cookies
+	cookies     *securecookie.SecureCookie
+}
+
+func (p *OIDCProvider) Validate() error {
+	if p.oauth2.ClientID == "" {
+		return errors.New("client_id is required")
+	}
+	if p.oauth2.RedirectURL == "" {
+		return errors.New("redirect_uri is required")
+	}
+	if !p.redirectUri.IsAbs() {
+		return errors.New("redirect_uri must be absolute")
+	}
+
+	if err := p.cookie.Validate(); err != nil {
+		return fmt.Errorf("invalid cookie options: %w", err)
+	}
+	return nil
 }
 
 var _ caddy.Module = (*OIDCProviderModule)(nil)
 var _ caddy.Provisioner = (*OIDCProviderModule)(nil)
+var _ caddy.Validator = (*OIDCProviderModule)(nil)
 var _ caddyfile.Unmarshaler = (*OIDCProviderModule)(nil)
 
 // OIDCProviderModule holds the configuration for an OIDC provider
@@ -118,12 +135,16 @@ func (m *OIDCProviderModule) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("invalid redirect_uri: %w", err)
 	}
 
+	if l := len(m.SecretKey); l != 32 && l != 64 {
+		return fmt.Errorf("secret_key must be 32 or 64 bytes, got %d", l)
+	}
+
 	m.data = &OIDCProvider{
-		log:             ctx.Logger(m),
-		redirectUriPath: redirectUri.Path,
-		clock:           time.Now,
-		cookies:         securecookie.New([]byte(m.SecretKey), []byte(m.SecretKey)),
-		cookie:          m.Cookie,
+		log:         ctx.Logger(m),
+		redirectUri: redirectUri,
+		clock:       time.Now,
+		cookies:     securecookie.New([]byte(m.SecretKey), []byte(m.SecretKey)),
+		cookie:      m.Cookie,
 	}
 
 	if m.data.cookie == nil {
@@ -153,11 +174,15 @@ func (m *OIDCProviderModule) Provision(ctx caddy.Context) error {
 
 	m.data.oauth2 = &oauth2.Config{
 		ClientID:    m.ClientID,
-		RedirectURL: m.RedirectURI,
+		RedirectURL: redirectUri.String(),
 		Endpoint:    provider.Endpoint(),
 		// TODO configurable (offline access always?)
 		Scopes: []string{oidc.ScopeOpenID},
 	}
 
 	return nil
+}
+
+func (m *OIDCProviderModule) Validate() error {
+	return m.data.Validate()
 }

@@ -1,8 +1,10 @@
 package caddy_oauth2_proxy_auth
 
 import (
+	"errors"
 	"net/http"
 
+	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 )
 
@@ -15,6 +17,7 @@ var DefaultCookieOptions = Cookies{
 }
 
 var _ caddyfile.Unmarshaler = (*Cookies)(nil)
+var _ caddy.Validator = (*Cookies)(nil)
 
 type Cookies struct {
 	Name     string        `json:"name"`
@@ -67,6 +70,20 @@ func (o *Cookies) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 		}
 	}
+	return nil
+}
+
+func (o *Cookies) Validate() error {
+	if o.Name == "" {
+		return errors.New("cookie name cannot be empty")
+	}
+
+	switch o.SameSite {
+	case http.SameSiteLaxMode, http.SameSiteStrictMode, http.SameSiteNoneMode:
+	default:
+		return errors.New("same_site must be one of lax, strict, or none")
+	}
+
 	return nil
 }
 

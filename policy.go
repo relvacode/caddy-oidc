@@ -214,6 +214,16 @@ func (ps *PolicySet) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	return nil
 }
 
+// ContainsAllow returns true if the set contains at least one Allow policy.
+func (ps *PolicySet) ContainsAllow() bool {
+	for _, p := range *ps {
+		if p.Action == Allow {
+			return true
+		}
+	}
+	return false
+}
+
 // Evaluate evaluates the policies in the set and returns true if the request is allowed.
 // If at least one Allow policy is found, then the evaluation result is Permit.
 // If at least one Deny policy is found, then the evaluation result is RejectExplicit.
