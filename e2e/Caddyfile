@@ -18,6 +18,11 @@
 http:// {
     log
 
-    oidc example
+    oidc example {
+        allow {
+            # An empty allow block is equivalent to match any valid non-anonymous user.
+        }
+    }
+
     respond "Authorized"
 }

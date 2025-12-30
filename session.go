@@ -16,8 +16,11 @@ func SessionFromIDToken(id *oidc.IDToken) *Session {
 	}
 }
 
+var AnonymousSession = &Session{Anonymous: true}
+
 type Session struct {
 	Uid          string  `json:"u"`
+	Anonymous    bool    `json:"-"`
 	ExpiresAt    int64   `json:"e,omitempty"`
 	RefreshToken *string `json:"r,omitempty"`
 }

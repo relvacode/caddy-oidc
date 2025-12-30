@@ -8,11 +8,65 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gorilla/securecookie"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestOIDCAuthorizer_UnmarshalCaddyfile(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		expect    OIDCAuthorizer
+		shouldErr bool
+	}{
+		{
+			name:  "without block",
+			input: `oidc test`,
+			expect: OIDCAuthorizer{
+				Provider: "test",
+			},
+		},
+		{
+			name: "with block",
+			input: `oidc test {
+				allow {
+					anonymous
+				}
+			}`,
+			expect: OIDCAuthorizer{
+				Provider: "test",
+				Policies: PolicySet{
+					&Policy{
+						Action: Allow,
+						RequestMatcher: RequestMatcher{
+							Anonymous: true,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := caddyfile.NewTestDispenser(tt.input)
+
+			var o OIDCAuthorizer
+			err := o.UnmarshalCaddyfile(d)
+
+			if tt.shouldErr {
+				assert.Error(t, err)
+				return
+			}
+
+			assert.NoError(t, err)
+			assert.EqualValues(t, tt.expect, o)
+		})
+	}
+}
 
 type TestHandler struct {
 	calls int
@@ -55,6 +109,71 @@ func TestOIDCAuthorizer_ServeHTTP_WithoutAuth(t *testing.T) {
 	if assert.NoError(t, err) {
 		assert.Equal(t, fmt.Sprintf("%s|%s", auth.m.cookie.Name, redir.Query().Get("state")), c.Name)
 	}
+}
+
+func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_NoPolicy(t *testing.T) {
+	auth := &OIDCAuthorizer{
+		m: GenerateTestProvider(),
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "Bearer "+GenerateTestJWTUnsigned())
+	h := new(TestHandler)
+
+	err := auth.ServeHTTP(w, r, h)
+	assert.ErrorIs(t, err, ErrAccessDenied)
+}
+
+func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_AllowUser(t *testing.T) {
+	auth := &OIDCAuthorizer{
+		Policies: PolicySet{
+			&Policy{
+				Action: Allow,
+				RequestMatcher: RequestMatcher{
+					User: []Wildcard{"test"},
+				},
+			},
+		},
+		m: GenerateTestProvider(),
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "Bearer "+GenerateTestJWTUnsigned())
+	h := new(TestHandler)
+
+	err := auth.ServeHTTP(w, r, h)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, h.calls)
+}
+
+func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_AllowUser_WithDeny(t *testing.T) {
+	auth := &OIDCAuthorizer{
+		Policies: PolicySet{
+			&Policy{
+				Action: Allow,
+				RequestMatcher: RequestMatcher{
+					User: []Wildcard{"test"},
+				},
+			},
+			&Policy{
+				Action: Deny,
+				RequestMatcher: RequestMatcher{
+					User: []Wildcard{"test"},
+				},
+			},
+		},
+		m: GenerateTestProvider(),
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "Bearer "+GenerateTestJWTUnsigned())
+	h := new(TestHandler)
+
+	err := auth.ServeHTTP(w, r, h)
+	assert.ErrorIs(t, err, ErrAccessDenied)
 }
 
 func TestOIDCAuthorizer_Authenticate_WithBearerAuthentication(t *testing.T) {

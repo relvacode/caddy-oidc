@@ -17,12 +17,16 @@ import (
 
 // TODO validation
 // TODO bypass client ip (can it be done in caddy natively?)
+// TODO validate policy
 
 func init() {
 	caddy.RegisterModule(new(OIDCAuthorizer))
 	httpcaddyfile.RegisterHandlerDirective("oidc", parseCaddyfileHandler[OIDCAuthorizer])
 	httpcaddyfile.RegisterDirectiveOrder("oidc", httpcaddyfile.Before, "basicauth")
 }
+
+var ErrNoAuthorization = errors.New("no authorization provided")
+var ErrAccessDenied = errors.New("access denied")
 
 type CSRFToken struct {
 	PKCEVerifier string `json:"v"`
@@ -35,8 +39,10 @@ var _ caddyfile.Unmarshaler = (*OIDCAuthorizer)(nil)
 var _ caddyhttp.MiddlewareHandler = (*OIDCAuthorizer)(nil)
 
 type OIDCAuthorizer struct {
-	Provider string `json:"provider"`
-	m        *OIDCProvider
+	Provider string    `json:"provider"`
+	Policies PolicySet `json:"policies"`
+
+	m *OIDCProvider
 }
 
 func (d *OIDCAuthorizer) CaddyModule() caddy.ModuleInfo {
@@ -48,16 +54,41 @@ func (d *OIDCAuthorizer) CaddyModule() caddy.ModuleInfo {
 
 // UnmarshalCaddyfile sets up the OIDCAuthorizer from Caddyfile tokens.
 /*
-oidc example
+oidc example {
+	allow|deny {
+		...
+	}
+}
 */
 func (d *OIDCAuthorizer) UnmarshalCaddyfile(dis *caddyfile.Dispenser) error {
 	for dis.Next() {
 		if !dis.NextArg() {
 			return dis.ArgErr()
 		}
-
 		d.Provider = dis.Val()
-		break
+
+		for dis.NextBlock(0) {
+			switch dis.Val() {
+			case "allow", "deny":
+
+				var pol Policy
+				switch dis.Val() {
+				case "allow":
+					pol.Action = Allow
+				case "deny":
+					pol.Action = Deny
+				}
+
+				err := pol.RequestMatcher.UnmarshalCaddyfile(dis)
+				if err != nil {
+					return err
+				}
+
+				d.Policies = append(d.Policies, &pol)
+			default:
+				return dis.Errf("unrecognized subdirective '%s'", dis.Val())
+			}
+		}
 	}
 
 	return nil
@@ -83,17 +114,8 @@ func (d *OIDCAuthorizer) Provision(ctx caddy.Context) error {
 	return nil
 }
 
-var ErrNoAuthorization = errors.New("no authorization provided")
-
-// AuthIsRequired returns true the error indicates that the request is unauthenticated,
-// and therefore the request should initiate the login flow before continuing.
-func AuthIsRequired(err error) bool {
-	var expired *oidc.TokenExpiredError
-	return err != nil && (errors.Is(err, ErrNoAuthorization) || errors.As(err, &expired))
-}
-
 // SessionFromAuthorizationHeader extracts the session an access or ID token parsed from the request Authorization header.
-// Returns ErrNoAuthorization if a valid token could not be found.
+// Returns ErrNoAuthorization if a valid token could not be found or a valid, signed token exists but is expired.
 func (d *OIDCAuthorizer) SessionFromAuthorizationHeader(r *http.Request) (*Session, error) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
@@ -107,12 +129,20 @@ func (d *OIDCAuthorizer) SessionFromAuthorizationHeader(r *http.Request) (*Sessi
 
 	id, err := d.m.verifier.Verify(r.Context(), parts[1])
 	if err != nil {
+		// Return an anonymous session if the token is expired
+		var e *oidc.TokenExpiredError
+		if errors.As(err, &e) {
+			return nil, ErrNoAuthorization
+		}
+
 		return nil, caddyhttp.Error(http.StatusUnauthorized, err)
 	}
 
 	return SessionFromIDToken(id), nil
 }
 
+// SessionFromCookie extracts the session from the secure request cookie.
+// Returns ErrNoAuthorization if the cookie is not found or a signed token does exist but is not expired.
 func (d *OIDCAuthorizer) SessionFromCookie(r *http.Request) (*Session, error) {
 	cookiePlain, err := r.Cookie(d.m.cookie.Name)
 	if err != nil {
@@ -129,6 +159,12 @@ func (d *OIDCAuthorizer) SessionFromCookie(r *http.Request) (*Session, error) {
 	// TODO refresh token exchange
 	err = session.ValidateClock(d.m.clock())
 	if err != nil {
+		// Return an anonymous session if the token is expired
+		var e *oidc.TokenExpiredError
+		if errors.As(err, &e) {
+			return nil, ErrNoAuthorization
+		}
+
 		return nil, err
 	}
 
@@ -138,12 +174,25 @@ func (d *OIDCAuthorizer) SessionFromCookie(r *http.Request) (*Session, error) {
 // Authenticate the incoming request by either reading a token from the Authorization header or the session token,
 // preferring an explicit token from the Authorization header.
 func (d *OIDCAuthorizer) Authenticate(r *http.Request) (*Session, error) {
-	s, err := d.SessionFromAuthorizationHeader(r)
-	if err != nil && errors.Is(err, ErrNoAuthorization) {
-		s, err = d.SessionFromCookie(r)
+	// Each of these sources are expected to return a valid non-anonymous non-expired session if the error is not-nil.
+	// Returning ErrNoAuthorization indicates that no valid token was found.
+	// Any other error is returned.
+	var authSources = []func(*http.Request) (*Session, error){
+		d.SessionFromAuthorizationHeader,
+		d.SessionFromCookie,
 	}
 
-	return s, err
+	for _, source := range authSources {
+		s, err := source(r)
+		if err == nil {
+			return s, nil
+		}
+		if !errors.Is(err, ErrNoAuthorization) {
+			return nil, err
+		}
+	}
+
+	return AnonymousSession, nil
 }
 
 // StartAuthorization starts the authorization flow by setting the state cookie and redirecting to the authorization endpoint.
@@ -251,25 +300,31 @@ func (d *OIDCAuthorizer) ServeHTTP(rw http.ResponseWriter, r *http.Request, next
 	caddy.Log().Info("OIDCAuthorizer handling request")
 
 	// Check if the request is an OAuth callback
-	if r.URL.Path == d.m.redirectUriPath {
+	if r.Method == http.MethodGet && r.URL.Path == d.m.redirectUriPath {
 		return d.HandleOauthCallback(rw, r, next)
 	}
 
-	_, err := d.Authenticate(r)
-
-	// If authentication is required and the HTTP method is GET, then initiate a login flow
-	// and redirect the client to the authorization endpoint of the OIDC provider.
-	if AuthIsRequired(err) && r.Method == http.MethodGet {
-		return d.StartAuthorization(rw, r)
-	}
-
-	// Any other error is propagated up to caddy for handling
+	s, err := d.Authenticate(r)
 	if err != nil {
 		return err
 	}
 
-	// TODO inject caddy username
+	switch d.Policies.Evaluate(r, s) {
+	case Permit:
+		return next.ServeHTTP(rw, r)
+	case RejectExplicit:
+		return caddyhttp.Error(http.StatusForbidden, ErrAccessDenied)
+	case RejectImplicit:
+		// If the evaluation result is an implicit reject, then check if the session is anonymous.
+		// If anonymous, then start the authorization flow.
+		// In other words, if not authenticated and not otherwise explicitly denied, then start the authorization flow.
+		if s.Anonymous {
+			return d.StartAuthorization(rw, r)
+		}
 
-	// Authentication succeeded
-	return next.ServeHTTP(rw, r)
+		return caddyhttp.Error(http.StatusForbidden, ErrAccessDenied)
+	default:
+		// impossible
+		panic("invalid policy evaluation result")
+	}
 }
