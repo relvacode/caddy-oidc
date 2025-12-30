@@ -78,7 +78,7 @@ func (h *TestHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) error {
 
 func TestOIDCMiddleware_ServeHTTP_WithoutAuth(t *testing.T) {
 	auth := &OIDCMiddleware{
-		au: GenerateTestAuthenticator(),
+		au: Defer(func() (*Authenticator, error) { return GenerateTestAuthenticator(), nil }),
 	}
 
 	w := httptest.NewRecorder()
@@ -111,7 +111,7 @@ func TestOIDCMiddleware_ServeHTTP_WithoutAuth(t *testing.T) {
 
 func TestOIDCMiddleware_ServeHTTP_WithBearerAuthentication_NoPolicy(t *testing.T) {
 	auth := &OIDCMiddleware{
-		au: GenerateTestAuthenticator(),
+		au: Defer(func() (*Authenticator, error) { return GenerateTestAuthenticator(), nil }),
 	}
 
 	w := httptest.NewRecorder()
@@ -133,7 +133,7 @@ func TestOIDCMiddleware_ServeHTTP_WithBearerAuthentication_AllowUser(t *testing.
 				},
 			},
 		},
-		au: GenerateTestAuthenticator(),
+		au: Defer(func() (*Authenticator, error) { return GenerateTestAuthenticator(), nil }),
 	}
 
 	w := httptest.NewRecorder()
@@ -156,7 +156,7 @@ func TestOIDCMiddleware_ServeHTTP_SetsReplacerUserID(t *testing.T) {
 				},
 			},
 		},
-		au: GenerateTestAuthenticator(),
+		au: Defer(func() (*Authenticator, error) { return GenerateTestAuthenticator(), nil }),
 	}
 
 	var repl = caddy.NewEmptyReplacer()
@@ -189,7 +189,7 @@ func TestOIDCMiddleware_ServeHTTP_WithBearerAuthentication_AllowUser_WithDeny(t 
 				},
 			},
 		},
-		au: GenerateTestAuthenticator(),
+		au: Defer(func() (*Authenticator, error) { return GenerateTestAuthenticator(), nil }),
 	}
 
 	w := httptest.NewRecorder()

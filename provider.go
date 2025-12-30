@@ -1,13 +1,13 @@
 package caddy_oidc
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -36,7 +36,6 @@ type OIDCProviderModule struct {
 	SecretKey             string   `json:"secret_key"`
 	RedirectURI           string   `json:"redirect_uri"`
 	TLSInsecureSkipVerify bool     `json:"tls_insecure_skip_verify"`
-	DiscoveryURL          string   `json:"discovery_url,omitempty"`
 	Cookie                *Cookies `json:"cookie"`
 }
 
@@ -96,11 +95,6 @@ func (m *OIDCProviderModule) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 		case "tls_insecure_skip_verify":
 			m.TLSInsecureSkipVerify = true
-		case "discovery_url":
-			if !d.NextArg() {
-				return d.ArgErr()
-			}
-			m.DiscoveryURL = d.Val()
 		default:
 			return d.Errf("unrecognized subdirective '%s'", d.Val())
 		}
@@ -113,10 +107,6 @@ func (m *OIDCProviderModule) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 func (m *OIDCProviderModule) Provision(_ caddy.Context) error {
 	var repl = caddy.NewReplacer()
 	m.SecretKey = repl.ReplaceAll(m.SecretKey, "")
-
-	if m.DiscoveryURL == "" {
-		m.DiscoveryURL = strings.TrimSuffix(m.Issuer, "/") + "/.well-known/openid-configuration"
-	}
 
 	if m.Cookie == nil {
 		m.Cookie = new(Cookies)
@@ -147,8 +137,8 @@ func (m *OIDCProviderModule) Validate() error {
 	return nil
 }
 
-// CreateAuthorizer creates an Authenticator instance from this provider configuration.
-func (m *OIDCProviderModule) CreateAuthorizer(ctx caddy.Context) (*Authenticator, error) {
+// Create creates an Authenticator instance from this provider configuration.
+func (m *OIDCProviderModule) Create(ctx caddy.Context) (*Authenticator, error) {
 	redirectUri, err := url.Parse(m.RedirectURI)
 	if err != nil {
 		return nil, fmt.Errorf("invalid redirect_uri: %w", err)
@@ -186,7 +176,8 @@ func (m *OIDCProviderModule) CreateAuthorizer(ctx caddy.Context) (*Authenticator
 
 	authorizer.log.Debug("performing OIDC discovery")
 
-	provider, err := Discover(ctx, authorizer.httpClient, m.DiscoveryURL)
+	providerCtx := context.WithValue(ctx, oauth2.HTTPClient, authorizer.httpClient)
+	provider, err := oidc.NewProvider(providerCtx, m.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery failed: %w", err)
 	}
