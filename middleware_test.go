@@ -17,13 +17,13 @@ func TestOIDCAuthorizer_UnmarshalCaddyfile(t *testing.T) {
 	tests := []struct {
 		name      string
 		input     string
-		expect    OIDCAuthorizer
+		expect    OIDCMiddleware
 		shouldErr bool
 	}{
 		{
 			name:  "without block",
 			input: `oidc test`,
-			expect: OIDCAuthorizer{
+			expect: OIDCMiddleware{
 				Provider: "test",
 			},
 		},
@@ -34,7 +34,7 @@ func TestOIDCAuthorizer_UnmarshalCaddyfile(t *testing.T) {
 					anonymous
 				}
 			}`,
-			expect: OIDCAuthorizer{
+			expect: OIDCMiddleware{
 				Provider: "test",
 				Policies: PolicySet{
 					&Policy{
@@ -52,7 +52,7 @@ func TestOIDCAuthorizer_UnmarshalCaddyfile(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d := caddyfile.NewTestDispenser(tt.input)
 
-			var o OIDCAuthorizer
+			var o OIDCMiddleware
 			err := o.UnmarshalCaddyfile(d)
 
 			if tt.shouldErr {
@@ -77,9 +77,9 @@ func (h *TestHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) error {
 }
 
 func TestOIDCAuthorizer_ServeHTTP_WithoutAuth(t *testing.T) {
-	pr := GenerateTestProvider()
-	auth := &OIDCAuthorizer{
-		m: Defer(func() (*OIDCProvider, error) {
+	pr := GenerateTestAuthorizer()
+	auth := &OIDCMiddleware{
+		m: Defer(func() (*Authorizer, error) {
 			return pr, nil
 		}),
 	}
@@ -113,9 +113,9 @@ func TestOIDCAuthorizer_ServeHTTP_WithoutAuth(t *testing.T) {
 }
 
 func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_NoPolicy(t *testing.T) {
-	auth := &OIDCAuthorizer{
-		m: Defer(func() (*OIDCProvider, error) {
-			return GenerateTestProvider(), nil
+	auth := &OIDCMiddleware{
+		m: Defer(func() (*Authorizer, error) {
+			return GenerateTestAuthorizer(), nil
 		}),
 	}
 
@@ -129,8 +129,8 @@ func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_NoPolicy(t *testing.T
 }
 
 func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_AllowUser(t *testing.T) {
-	pr := GenerateTestProvider()
-	auth := &OIDCAuthorizer{
+	pr := GenerateTestAuthorizer()
+	auth := &OIDCMiddleware{
 		Policies: PolicySet{
 			&Policy{
 				Action: Allow,
@@ -139,7 +139,7 @@ func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_AllowUser(t *testing.
 				},
 			},
 		},
-		m: Defer(func() (*OIDCProvider, error) {
+		m: Defer(func() (*Authorizer, error) {
 			return pr, nil
 		}),
 	}
@@ -155,8 +155,8 @@ func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_AllowUser(t *testing.
 }
 
 func TestOIDCAuthorizer_ServeHTTP_SetsReplacerUserID(t *testing.T) {
-	pr := GenerateTestProvider()
-	auth := &OIDCAuthorizer{
+	pr := GenerateTestAuthorizer()
+	auth := &OIDCMiddleware{
 		Policies: PolicySet{
 			&Policy{
 				Action: Allow,
@@ -165,7 +165,7 @@ func TestOIDCAuthorizer_ServeHTTP_SetsReplacerUserID(t *testing.T) {
 				},
 			},
 		},
-		m: Defer(func() (*OIDCProvider, error) {
+		m: Defer(func() (*Authorizer, error) {
 			return pr, nil
 		}),
 	}
@@ -185,8 +185,8 @@ func TestOIDCAuthorizer_ServeHTTP_SetsReplacerUserID(t *testing.T) {
 }
 
 func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_AllowUser_WithDeny(t *testing.T) {
-	pr := GenerateTestProvider()
-	auth := &OIDCAuthorizer{
+	pr := GenerateTestAuthorizer()
+	auth := &OIDCMiddleware{
 		Policies: PolicySet{
 			&Policy{
 				Action: Allow,
@@ -201,7 +201,7 @@ func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_AllowUser_WithDeny(t 
 				},
 			},
 		},
-		m: Defer(func() (*OIDCProvider, error) {
+		m: Defer(func() (*Authorizer, error) {
 			return pr, nil
 		}),
 	}
