@@ -96,5 +96,5 @@ func TestIntegrationOAuthLoginFlow(t *testing.T) {
 
 	data, err := io.ReadAll(resp.Body)
 	assert.NoError(t, err)
-	assert.Contains(t, string(data), "Authorized")
+	assert.Contains(t, string(data), "admin@example.com")
 }

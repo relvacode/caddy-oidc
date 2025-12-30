@@ -41,6 +41,20 @@ func (c *oauth2ConfigWithHTTPClient) Exchange(ctx context.Context, code string, 
 	return c.Config.Exchange(ctx, code, opts...)
 }
 
+type UserInfoClient interface {
+	UserInfo(ctx context.Context, tokenSource oauth2.TokenSource) (*oidc.UserInfo, error)
+}
+
+type oidcProviderWithHttpClient struct {
+	httpClient *http.Client
+	provider   *oidc.Provider
+}
+
+func (c *oidcProviderWithHttpClient) UserInfo(ctx context.Context, tokenSource oauth2.TokenSource) (*oidc.UserInfo, error) {
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, c.httpClient)
+	return c.provider.UserInfo(ctx, tokenSource)
+}
+
 // Authenticator holds the built configuration for an OIDC provider and authentication logic
 type Authenticator struct {
 	log         *zap.Logger
@@ -48,6 +62,8 @@ type Authenticator struct {
 	clock       func() time.Time
 	httpClient  *http.Client
 	verifier    *oidc.IDTokenVerifier
+	uid         UidClaim
+	userInfo    UserInfoClient
 	oauth2      OAuth2Client
 	cookie      *Cookies
 	cookies     *securecookie.SecureCookie
@@ -71,7 +87,15 @@ func (au *Authenticator) SessionFromAuthorizationHeader(r *http.Request) (*Sessi
 		return nil, caddyhttp.Error(http.StatusUnauthorized, err)
 	}
 
-	return SessionFromIDToken(id), nil
+	uid, err := au.uid.FromClaims(id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract uid from claims: %w", err)
+	}
+
+	return &Session{
+		Uid:       uid,
+		ExpiresAt: id.Expiry.Unix(),
+	}, nil
 }
 
 // SessionFromCookie extracts the session from the secure request cookie.
@@ -194,19 +218,24 @@ func (au *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request, 
 		return caddyhttp.Error(http.StatusBadRequest, fmt.Errorf("no id_token in response"))
 	}
 
-	idToken, err := au.verifier.Verify(r.Context(), idTokenPlain)
+	_, err = au.verifier.Verify(r.Context(), idTokenPlain)
 	if err != nil {
 		return caddyhttp.Error(http.StatusBadRequest, fmt.Errorf("failed to verify id_token: %w", err))
 	}
 
-	var session = SessionFromIDToken(idToken)
-
-	// Attach the refresh token to the session (if one is available)
-	if refreshToken, ok := response.Extra("refresh_token").(string); ok {
-		session.RefreshToken = &refreshToken
+	userInfo, err := au.userInfo.UserInfo(r.Context(), oauth2.StaticTokenSource(response))
+	if err != nil {
+		return caddyhttp.Error(http.StatusBadRequest, fmt.Errorf("failed to fetch userinfo: %w", err))
 	}
 
 	// Generate the session cookie and set it
+	uid, err := au.uid.FromClaims(userInfo)
+	if err != nil {
+		return fmt.Errorf("failed to extract uid from user info (missing scope?): %w", err)
+	}
+
+	session := Session{Uid: uid, ExpiresAt: response.Expiry.Unix()}
+
 	sessionCookie, err := session.HttpCookie(au.cookie, au.cookies)
 	if err != nil {
 		return caddyhttp.Error(http.StatusBadRequest, fmt.Errorf("failed to create session cookie: %w", err))

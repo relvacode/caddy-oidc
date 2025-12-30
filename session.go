@@ -1,6 +1,7 @@
 package caddy_oidc
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -8,21 +9,37 @@ import (
 	"github.com/gorilla/securecookie"
 )
 
-func SessionFromIDToken(id *oidc.IDToken) *Session {
-	return &Session{
-		Uid:          id.Subject,
-		ExpiresAt:    id.Expiry.Unix(),
-		RefreshToken: nil,
-	}
-}
-
 var AnonymousSession = &Session{Anonymous: true}
 
+type ClaimsDecoder interface {
+	Claims(v any) error
+}
+
+const UidSubClaimKey UidClaim = "sub"
+
+// UidClaim represents a JWT claim that contains the user id
+type UidClaim string
+
+// FromClaims extracts the user id from the claims
+func (u UidClaim) FromClaims(claims ClaimsDecoder) (string, error) {
+	var arbitraryClaims = make(map[string]any)
+	err := claims.Claims(&arbitraryClaims)
+	if err != nil {
+		return "", err
+	}
+
+	val, ok := arbitraryClaims[string(u)].(string)
+	if !ok {
+		return "", fmt.Errorf("missing claim '%s' for username", u)
+	}
+
+	return val, nil
+}
+
 type Session struct {
-	Uid          string  `json:"u"`
-	Anonymous    bool    `json:"-"`
-	ExpiresAt    int64   `json:"e,omitempty"`
-	RefreshToken *string `json:"r,omitempty"`
+	Uid       string `json:"u"`
+	Anonymous bool   `json:"-"`
+	ExpiresAt int64  `json:"e,omitempty"`
 }
 
 // HttpCookie returns the http cookie representation of the cookies

@@ -9,6 +9,8 @@
         client_id xyz
         redirect_uri http://caddy/oauth/callback
         secret_key {env.OIDC_SECRET_KEY}
+        scope openid email
+        username email
         cookie {
             insecure
         }
@@ -24,5 +26,5 @@ http:// {
         }
     }
 
-    respond "Authorized"
+    respond "{http.auth.user.id}"
 }

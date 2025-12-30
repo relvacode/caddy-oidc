@@ -50,6 +50,8 @@ func TestOIDCProvider_UnmarshalCaddyfile(t *testing.T) {
 				redirect_uri http://localhost/oauth/callback
 				secret_key 7DFSrbya1rvBBmcaxD
 				tls_insecure_skip_verify
+				scope openid email profile
+				username email
 				cookie {
 					name session_id
 					same_site strict
@@ -63,6 +65,8 @@ func TestOIDCProvider_UnmarshalCaddyfile(t *testing.T) {
 				RedirectURI:           "http://localhost/oauth/callback",
 				SecretKey:             "7DFSrbya1rvBBmcaxD",
 				TLSInsecureSkipVerify: true,
+				Scope:                 []string{"openid", "email", "profile"},
+				Username:              "email",
 				Cookie: &Cookies{
 					Name:     "session_id",
 					SameSite: http.SameSiteStrictMode,

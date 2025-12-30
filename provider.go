@@ -37,6 +37,8 @@ type OIDCProviderModule struct {
 	RedirectURI           string   `json:"redirect_uri"`
 	TLSInsecureSkipVerify bool     `json:"tls_insecure_skip_verify"`
 	Cookie                *Cookies `json:"cookie"`
+	Scope                 []string `json:"scope"`
+	Username              UidClaim `json:"username"`
 }
 
 func (*OIDCProviderModule) CaddyModule() caddy.ModuleInfo {
@@ -55,6 +57,8 @@ func (*OIDCProviderModule) CaddyModule() caddy.ModuleInfo {
 	secret_key <secret_key>
 	tls_insecure_skip_verify
 	discovery_url <discovery_url>
+	scope [<scope>...]
+	username <username>
 	cookie <name> | {
 		name <name>
 		same_site <same_site>
@@ -95,6 +99,13 @@ func (m *OIDCProviderModule) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 		case "tls_insecure_skip_verify":
 			m.TLSInsecureSkipVerify = true
+		case "scope":
+			m.Scope = append(m.Scope, d.RemainingArgs()...)
+		case "username":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			m.Username = UidClaim(d.Val())
 		default:
 			return d.Errf("unrecognized subdirective '%s'", d.Val())
 		}
@@ -113,6 +124,14 @@ func (m *OIDCProviderModule) Provision(_ caddy.Context) error {
 		*m.Cookie = DefaultCookieOptions
 	}
 
+	if m.Scope == nil {
+		m.Scope = []string{oidc.ScopeOpenID}
+	}
+
+	if m.Username == "" {
+		m.Username = UidSubClaimKey
+	}
+
 	return nil
 }
 
@@ -128,6 +147,9 @@ func (m *OIDCProviderModule) Validate() error {
 	}
 	if len(m.SecretKey) != 32 && len(m.SecretKey) != 64 {
 		return errors.New("secret_key must be 32 or 64 bytes")
+	}
+	if m.Username == "" {
+		return errors.New("username cannot be empty")
 	}
 
 	if err := m.Cookie.Validate(); err != nil {
@@ -169,6 +191,7 @@ func (m *OIDCProviderModule) Create(ctx caddy.Context) (*Authenticator, error) {
 		log:         log,
 		redirectUri: redirectUri,
 		httpClient:  retryClient.StandardClient(),
+		uid:         m.Username,
 		clock:       time.Now,
 		cookies:     securecookie.New([]byte(m.SecretKey), []byte(m.SecretKey)),
 		cookie:      m.Cookie,
@@ -189,14 +212,18 @@ func (m *OIDCProviderModule) Create(ctx caddy.Context) (*Authenticator, error) {
 		Now:      authorizer.clock,
 	})
 
+	authorizer.userInfo = &oidcProviderWithHttpClient{
+		httpClient: authorizer.httpClient,
+		provider:   provider,
+	}
+
 	authorizer.oauth2 = &oauth2ConfigWithHTTPClient{
 		httpClient: authorizer.httpClient,
 		Config: &oauth2.Config{
 			ClientID:    m.ClientID,
 			RedirectURL: redirectUri.String(),
 			Endpoint:    provider.Endpoint(),
-			// TODO configurable (offline access always?)
-			Scopes: []string{oidc.ScopeOpenID},
+			Scopes:      m.Scope,
 		},
 	}
 

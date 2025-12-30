@@ -27,6 +27,7 @@ func GenerateTestAuthenticator() *Authenticator {
 			Path:   "/oauth/callback",
 		},
 		log:     zap.NewNop(),
+		uid:     UidSubClaimKey,
 		cookies: securecookie.New([]byte("VTQOz22ZZiyYNciwtDyckU1aJWQSCXnm"), []byte("VTQOz22ZZiyYNciwtDyckU1aJWQSCXnm")),
 		verifier: oidc.NewVerifier("http://openid/example", AlwaysValidKeySet{}, &oidc.Config{
 			ClientID:             "xyz",
