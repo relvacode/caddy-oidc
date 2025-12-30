@@ -1,0 +1,23 @@
+{
+    auto_https off
+    log {
+        level DEBUG
+    }
+
+    oidc example {
+        issuer_url http://oidc-provider/example
+        client_id xyz
+        redirect_uri http://caddy/oauth/callback
+        secret_key VTQOz22ZZiyYNciwtDyckU1aJWQSCXnm
+        cookie {
+            insecure
+        }
+    }
+}
+
+http:// {
+    log
+
+    oidc example
+    respond "Authorized"
+}

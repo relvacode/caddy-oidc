@@ -1,0 +1,37 @@
+# The base URL of dex. This must match your Caddyfile's issuer_url
+issuer: http://oidc-provider/example
+
+# Storage for the server state (sqlite is easiest for testing)
+storage:
+  type: sqlite3
+  config:
+    file: ":memory:"
+
+web:
+  http: 0.0.0.0:80
+
+# Static clients to allow
+staticClients:
+  - id: xyz
+    public: true
+    redirectURIs:
+      - 'http://caddy/oauth/callback'
+    name: 'Caddy Test App'
+
+# Static users for testing (avoids needing an external connector)
+staticPasswords:
+  - email: "admin@example.com"
+    # bcrypt hash of the string "password": $(echo password | htpasswd -BinC 10 admin | cut -d: -f2)
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: "admin"
+    userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+
+enablePasswordDB: true
+oauth2:
+  passwordConnector: local
+  skipApprovalScreen: true
+
+# Minimal logging for clean test output
+logger:
+  level: debug
+  format: text

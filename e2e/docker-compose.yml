@@ -1,0 +1,23 @@
+services:
+  oidc-provider:
+    image: ghcr.io/dexidp/dex:v2.37.0
+    volumes:
+      - ./dex.yaml:/etc/dex/cfg/config.yaml
+    command: dex serve /etc/dex/cfg/config.yaml
+  
+  caddy:
+    build:
+      context: ../
+      dockerfile: e2e/Dockerfile.caddy
+    image: local/caddy-oauth
+    depends_on:
+      - oidc-provider
+
+  test:
+    build:
+      context: ../
+      dockerfile: e2e/Dockerfile.test
+    image: local/caddy-oidc-test
+    depends_on:
+      - oidc-provider
+      - caddy
