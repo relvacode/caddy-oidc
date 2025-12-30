@@ -126,14 +126,37 @@ const (
 
 type PolicySet []*Policy
 
+func (ps *PolicySet) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	for nesting := d.Nesting(); d.NextBlock(nesting); {
+		var pol Policy
+		switch d.Val() {
+		case "allow":
+			pol.Action = Allow
+		case "deny":
+			pol.Action = Deny
+		default:
+			return d.Errf("unrecognized action '%s'", d.Val())
+		}
+
+		err := pol.RequestMatcher.UnmarshalCaddyfile(d)
+		if err != nil {
+			return err
+		}
+
+		*ps = append(*ps, &pol)
+	}
+
+	return nil
+}
+
 // Evaluate evaluates the policies in the set and returns true if the request is allowed.
 // If at least one Allow policy is found, then the evaluation result is Permit.
 // If at least one Deny policy is found, then the evaluation result is RejectExplicit.
 // Otherwise, the evaluation result is RejectImplicit.
-func (ps PolicySet) Evaluate(r *http.Request, s *Session) Evaluation {
+func (ps *PolicySet) Evaluate(r *http.Request, s *Session) Evaluation {
 	var isAllowed = false
 
-	for _, p := range ps {
+	for _, p := range *ps {
 		if p.Evaluate(r, s) {
 			switch p.Action {
 			case Allow:

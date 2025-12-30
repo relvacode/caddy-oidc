@@ -67,27 +67,9 @@ func (d *OIDCAuthorizer) UnmarshalCaddyfile(dis *caddyfile.Dispenser) error {
 		}
 		d.Provider = dis.Val()
 
-		for dis.NextBlock(0) {
-			switch dis.Val() {
-			case "allow", "deny":
-
-				var pol Policy
-				switch dis.Val() {
-				case "allow":
-					pol.Action = Allow
-				case "deny":
-					pol.Action = Deny
-				}
-
-				err := pol.RequestMatcher.UnmarshalCaddyfile(dis)
-				if err != nil {
-					return err
-				}
-
-				d.Policies = append(d.Policies, &pol)
-			default:
-				return dis.Errf("unrecognized subdirective '%s'", dis.Val())
-			}
+		err := d.Policies.UnmarshalCaddyfile(dis)
+		if err != nil {
+			return err
 		}
 	}
 

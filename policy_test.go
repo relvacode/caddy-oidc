@@ -1,6 +1,7 @@
 package caddy_oauth2_proxy_auth
 
 import (
+	"net/http/httptest"
 	"testing"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -75,6 +76,83 @@ func TestRequestMatcher_UnmarshalCaddyfile(t *testing.T) {
 
 			assert.NoError(t, err)
 			assert.EqualValues(t, tt.expect, o)
+		})
+	}
+}
+
+func TestPolicySet_Evaluate(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		session *Session
+		expect  Evaluation
+	}{
+		{
+			name: "empty allow authenticated",
+			input: `{
+				allow { }
+			}`,
+			session: &Session{
+				Uid: "test",
+			},
+			expect: Permit,
+		},
+		{
+			name: "empty allow anonymous",
+			input: `{
+				allow { }
+			}`,
+			session: AnonymousSession,
+			expect:  RejectImplicit,
+		},
+		{
+			name: "empty allow explicit deny",
+			input: `{
+				allow { }
+				deny {
+					anonymous
+				}
+			}`,
+			session: AnonymousSession,
+			expect:  RejectExplicit,
+		},
+		{
+			name: "allow user",
+			input: `{
+				allow {
+					user foo bar test
+				}
+			}`,
+			session: &Session{
+				Uid: "test",
+			},
+			expect: Permit,
+		},
+		{
+			name: "allow user in domain",
+			input: `{
+				allow {
+					user *@example.com
+				}
+			}`,
+			session: &Session{
+				Uid: "test@example.com",
+			},
+			expect: Permit,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := caddyfile.NewTestDispenser(tt.input)
+
+			var ps PolicySet
+
+			err := ps.UnmarshalCaddyfile(d)
+			assert.NoError(t, err)
+
+			r := httptest.NewRequest("GET", "/", nil)
+			assert.Equal(t, tt.expect, ps.Evaluate(r, tt.session))
 		})
 	}
 }
