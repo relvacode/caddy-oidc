@@ -1,6 +1,7 @@
 package caddy_oauth2_proxy_auth
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -146,6 +148,33 @@ func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_AllowUser(t *testing.
 	err := auth.ServeHTTP(w, r, h)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, h.calls)
+}
+
+func TestOIDCAuthorizer_ServeHTTP_SetsReplacerUserID(t *testing.T) {
+	auth := &OIDCAuthorizer{
+		Policies: PolicySet{
+			&Policy{
+				Action: Allow,
+				RequestMatcher: RequestMatcher{
+					User: []Wildcard{"test"},
+				},
+			},
+		},
+		m: GenerateTestProvider(),
+	}
+
+	var repl = caddy.NewEmptyReplacer()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "Bearer "+GenerateTestJWTUnsigned())
+	r = r.WithContext(context.WithValue(r.Context(), caddy.ReplacerCtxKey, repl))
+	h := new(TestHandler)
+
+	err := auth.ServeHTTP(w, r, h)
+	assert.NoError(t, err)
+
+	assert.Equal(t, repl.ReplaceAll("{http.auth.user.id}", ""), "test")
 }
 
 func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_AllowUser_WithDeny(t *testing.T) {

@@ -291,6 +291,12 @@ func (d *OIDCAuthorizer) ServeHTTP(rw http.ResponseWriter, r *http.Request, next
 		return err
 	}
 
+	if !s.Anonymous {
+		if repl, ok := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer); ok {
+			repl.Set("http.auth.user.id", s.Uid)
+		}
+	}
+
 	e, err := d.Policies.Evaluate(r, s)
 	if err != nil {
 		return err
@@ -305,7 +311,7 @@ func (d *OIDCAuthorizer) ServeHTTP(rw http.ResponseWriter, r *http.Request, next
 		// If the evaluation result is an implicit reject, then check if the session is anonymous.
 		// If anonymous, then start the authorization flow.
 		// In other words, if not authenticated and not otherwise explicitly denied, then start the authorization flow.
-		if s.Anonymous {
+		if s.Anonymous && r.Method == http.MethodGet {
 			return d.StartAuthorization(rw, r)
 		}
 
