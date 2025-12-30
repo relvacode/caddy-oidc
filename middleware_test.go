@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestOIDCAuthorizer_UnmarshalCaddyfile(t *testing.T) {
+func TestOIDCMiddleware_UnmarshalCaddyfile(t *testing.T) {
 	tests := []struct {
 		name      string
 		input     string
@@ -76,12 +76,9 @@ func (h *TestHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) error {
 	return nil
 }
 
-func TestOIDCAuthorizer_ServeHTTP_WithoutAuth(t *testing.T) {
-	pr := GenerateTestAuthorizer()
+func TestOIDCMiddleware_ServeHTTP_WithoutAuth(t *testing.T) {
 	auth := &OIDCMiddleware{
-		m: Defer(func() (*Authorizer, error) {
-			return pr, nil
-		}),
+		au: GenerateTestAuthenticator(),
 	}
 
 	w := httptest.NewRecorder()
@@ -102,21 +99,19 @@ func TestOIDCAuthorizer_ServeHTTP_WithoutAuth(t *testing.T) {
 	assert.Equal(t, "S256", redir.Query().Get("code_challenge_method"))
 	assert.NotEmpty(t, redir.Query().Get("code_challenge"))
 	assert.Equal(t, "code", redir.Query().Get("response_type"))
-	assert.Equal(t, pr.oauth2.ClientID, redir.Query().Get("client_id"))
+	assert.Equal(t, "xyz", redir.Query().Get("client_id"))
 	assert.NotEmpty(t, redir.Query().Get("state"))
-	assert.Equal(t, pr.oauth2.RedirectURL, redir.Query().Get("redirect_uri"))
+	assert.Equal(t, "http://localhost/oauth/callback", redir.Query().Get("redirect_uri"))
 
 	c, err := http.ParseSetCookie(w.Header().Get("Set-Cookie"))
 	if assert.NoError(t, err) {
-		assert.Equal(t, fmt.Sprintf("%s|%s", pr.cookie.Name, redir.Query().Get("state")), c.Name)
+		assert.Equal(t, fmt.Sprintf("%s|%s", "caddy", redir.Query().Get("state")), c.Name)
 	}
 }
 
-func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_NoPolicy(t *testing.T) {
+func TestOIDCMiddleware_ServeHTTP_WithBearerAuthentication_NoPolicy(t *testing.T) {
 	auth := &OIDCMiddleware{
-		m: Defer(func() (*Authorizer, error) {
-			return GenerateTestAuthorizer(), nil
-		}),
+		au: GenerateTestAuthenticator(),
 	}
 
 	w := httptest.NewRecorder()
@@ -128,8 +123,7 @@ func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_NoPolicy(t *testing.T
 	assert.ErrorIs(t, err, ErrAccessDenied)
 }
 
-func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_AllowUser(t *testing.T) {
-	pr := GenerateTestAuthorizer()
+func TestOIDCMiddleware_ServeHTTP_WithBearerAuthentication_AllowUser(t *testing.T) {
 	auth := &OIDCMiddleware{
 		Policies: PolicySet{
 			&Policy{
@@ -139,9 +133,7 @@ func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_AllowUser(t *testing.
 				},
 			},
 		},
-		m: Defer(func() (*Authorizer, error) {
-			return pr, nil
-		}),
+		au: GenerateTestAuthenticator(),
 	}
 
 	w := httptest.NewRecorder()
@@ -154,8 +146,7 @@ func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_AllowUser(t *testing.
 	assert.Equal(t, 1, h.calls)
 }
 
-func TestOIDCAuthorizer_ServeHTTP_SetsReplacerUserID(t *testing.T) {
-	pr := GenerateTestAuthorizer()
+func TestOIDCMiddleware_ServeHTTP_SetsReplacerUserID(t *testing.T) {
 	auth := &OIDCMiddleware{
 		Policies: PolicySet{
 			&Policy{
@@ -165,9 +156,7 @@ func TestOIDCAuthorizer_ServeHTTP_SetsReplacerUserID(t *testing.T) {
 				},
 			},
 		},
-		m: Defer(func() (*Authorizer, error) {
-			return pr, nil
-		}),
+		au: GenerateTestAuthenticator(),
 	}
 
 	var repl = caddy.NewEmptyReplacer()
@@ -184,8 +173,7 @@ func TestOIDCAuthorizer_ServeHTTP_SetsReplacerUserID(t *testing.T) {
 	assert.Equal(t, repl.ReplaceAll("{http.auth.user.id}", ""), "test")
 }
 
-func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_AllowUser_WithDeny(t *testing.T) {
-	pr := GenerateTestAuthorizer()
+func TestOIDCMiddleware_ServeHTTP_WithBearerAuthentication_AllowUser_WithDeny(t *testing.T) {
 	auth := &OIDCMiddleware{
 		Policies: PolicySet{
 			&Policy{
@@ -201,9 +189,7 @@ func TestOIDCAuthorizer_ServeHTTP_WithBearerAuthentication_AllowUser_WithDeny(t 
 				},
 			},
 		},
-		m: Defer(func() (*Authorizer, error) {
-			return pr, nil
-		}),
+		au: GenerateTestAuthenticator(),
 	}
 
 	w := httptest.NewRecorder()

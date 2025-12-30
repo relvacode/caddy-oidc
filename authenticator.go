@@ -1,6 +1,7 @@
 package caddy_oidc
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -23,19 +24,38 @@ type CSRFToken struct {
 	RedirectURI  string `json:"r"`
 }
 
-type Authorizer struct {
+// OAuth2Client is an interface for the oauth2 client.
+type OAuth2Client interface {
+	AuthCodeURL(state string, opts ...oauth2.AuthCodeOption) string
+	Exchange(ctx context.Context, code string, opts ...oauth2.AuthCodeOption) (*oauth2.Token, error)
+}
+
+// oauth2ConfigWithHTTPClient wraps an oauth2.Config to inject an HTTP client instance for token exchange
+type oauth2ConfigWithHTTPClient struct {
+	httpClient *http.Client
+	*oauth2.Config
+}
+
+func (c *oauth2ConfigWithHTTPClient) Exchange(ctx context.Context, code string, opts ...oauth2.AuthCodeOption) (*oauth2.Token, error) {
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, c.httpClient)
+	return c.Config.Exchange(ctx, code, opts...)
+}
+
+// Authenticator holds the built configuration for an OIDC provider and authentication logic
+type Authenticator struct {
 	log         *zap.Logger
 	redirectUri *url.URL
 	clock       func() time.Time
+	httpClient  *http.Client
 	verifier    *oidc.IDTokenVerifier
-	oauth2      *oauth2.Config
+	oauth2      OAuth2Client
 	cookie      *Cookies
 	cookies     *securecookie.SecureCookie
 }
 
 // SessionFromAuthorizationHeader extracts the session an access or ID token parsed from the request Authorization header.
 // Returns ErrNoAuthorization if a valid token could not be found or a valid, signed token exists but is expired.
-func (au *Authorizer) SessionFromAuthorizationHeader(r *http.Request) (*Session, error) {
+func (au *Authenticator) SessionFromAuthorizationHeader(r *http.Request) (*Session, error) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
 		return nil, caddyhttp.Error(http.StatusUnauthorized, ErrNoAuthorization)
@@ -56,7 +76,7 @@ func (au *Authorizer) SessionFromAuthorizationHeader(r *http.Request) (*Session,
 
 // SessionFromCookie extracts the session from the secure request cookie.
 // Returns ErrNoAuthorization if the cookie is not found or a signed token does exist but is not expired.
-func (au *Authorizer) SessionFromCookie(r *http.Request) (*Session, error) {
+func (au *Authenticator) SessionFromCookie(r *http.Request) (*Session, error) {
 	cookiePlain, err := r.Cookie(au.cookie.Name)
 	if err != nil {
 		return nil, caddyhttp.Error(http.StatusUnauthorized, errors.Join(ErrNoAuthorization, err))
@@ -81,14 +101,14 @@ func (au *Authorizer) SessionFromCookie(r *http.Request) (*Session, error) {
 // AuthFromRequestSources are request token sources that are expected to return a valid non-anonymous non-expired session if the error is not-nil.
 // Returning ErrNoAuthorization or *oidc.TokenExpiredError indicates that no valid token was found.
 // Any other error is returned directly.
-var AuthFromRequestSources = []func(*Authorizer, *http.Request) (*Session, error){
-	(*Authorizer).SessionFromAuthorizationHeader,
-	(*Authorizer).SessionFromCookie,
+var AuthFromRequestSources = []func(*Authenticator, *http.Request) (*Session, error){
+	(*Authenticator).SessionFromAuthorizationHeader,
+	(*Authenticator).SessionFromCookie,
 }
 
 // Authenticate the incoming request by either reading a token from the Authorization header or the session token,
 // preferring an explicit token from the Authorization header.
-func (au *Authorizer) Authenticate(r *http.Request) (*Session, error) {
+func (au *Authenticator) Authenticate(r *http.Request) (*Session, error) {
 	for _, source := range AuthFromRequestSources {
 		s, err := source(au, r)
 		if err == nil {
@@ -106,7 +126,7 @@ func (au *Authorizer) Authenticate(r *http.Request) (*Session, error) {
 
 // StartLogin starts the authorization flow by setting the state cookie and redirecting to the authorization endpoint.
 // The state cookie is in the format of `<cookie_name>|<state>`, with the value containing the PKCE code verifier.
-func (au *Authorizer) StartLogin(w http.ResponseWriter, r *http.Request) error {
+func (au *Authenticator) StartLogin(w http.ResponseWriter, r *http.Request) error {
 	var (
 		state             = uuid.New().String()
 		pkceVerifier      = oauth2.GenerateVerifier()
@@ -134,7 +154,8 @@ func (au *Authorizer) StartLogin(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (au *Authorizer) HandleOauthCallback(w http.ResponseWriter, r *http.Request, _ caddyhttp.Handler) error {
+// HandleCallback handles the callback from the authorization endpoint.
+func (au *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request, _ caddyhttp.Handler) error {
 	if errValue := r.FormValue("error"); errValue != "" {
 		return caddyhttp.Error(http.StatusBadRequest, fmt.Errorf("error: %s, description: %s", errValue, r.FormValue("error_description")))
 	}
@@ -162,7 +183,8 @@ func (au *Authorizer) HandleOauthCallback(w http.ResponseWriter, r *http.Request
 	}
 
 	// Exchange code for tokens
-	response, err := au.oauth2.Exchange(r.Context(), r.FormValue("code"), oauth2.VerifierOption(csrfToken.PKCEVerifier))
+	oauth2Ctx := context.WithValue(r.Context(), oauth2.HTTPClient, au.httpClient)
+	response, err := au.oauth2.Exchange(oauth2Ctx, r.FormValue("code"), oauth2.VerifierOption(csrfToken.PKCEVerifier))
 	if err != nil {
 		return caddyhttp.Error(http.StatusBadRequest, fmt.Errorf("failed to exchange token: %w", err))
 	}

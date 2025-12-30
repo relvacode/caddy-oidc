@@ -15,8 +15,8 @@ import (
 	"golang.org/x/oauth2"
 )
 
-func GenerateTestAuthorizer() *Authorizer {
-	return &Authorizer{
+func GenerateTestAuthenticator() *Authenticator {
+	return &Authenticator{
 		cookie: &DefaultCookieOptions,
 		clock: func() time.Time {
 			return time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -44,7 +44,7 @@ func GenerateTestAuthorizer() *Authorizer {
 }
 
 func TestAuthorizer_Authenticate_WithBearerAuthentication(t *testing.T) {
-	pr := GenerateTestAuthorizer()
+	pr := GenerateTestAuthenticator()
 
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Authorization", "Bearer "+GenerateTestJWTUnsigned())
@@ -56,7 +56,7 @@ func TestAuthorizer_Authenticate_WithBearerAuthentication(t *testing.T) {
 }
 
 func TestAuthorizer_Authenticate_WithSessionCookie(t *testing.T) {
-	pr := GenerateTestAuthorizer()
+	pr := GenerateTestAuthenticator()
 
 	r := httptest.NewRequest("GET", "/", nil)
 
@@ -73,7 +73,7 @@ func TestAuthorizer_Authenticate_WithSessionCookie(t *testing.T) {
 }
 
 func TestAuthorizer_Authenticate_WithSessionCookie_SignedByOther(t *testing.T) {
-	pr := GenerateTestAuthorizer()
+	pr := GenerateTestAuthenticator()
 
 	r := httptest.NewRequest("GET", "/", nil)
 
@@ -95,7 +95,7 @@ func TestAuthorizer_Authenticate_WithSessionCookie_SignedByOther(t *testing.T) {
 }
 
 func TestAuthorizer_SessionFromCookie(t *testing.T) {
-	pr := GenerateTestAuthorizer()
+	pr := GenerateTestAuthenticator()
 
 	r := httptest.NewRequest("GET", "/", nil)
 

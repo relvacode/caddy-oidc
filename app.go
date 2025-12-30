@@ -1,6 +1,8 @@
 package caddy_oidc
 
 import (
+	"fmt"
+
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -64,6 +66,7 @@ var _ caddy.Provisioner = (*App)(nil)
 
 type App struct {
 	Providers map[string]*OIDCProviderModule `json:"providers,omitempty"`
+	providers map[string]*Authenticator
 }
 
 func (*App) CaddyModule() caddy.ModuleInfo {
@@ -77,10 +80,16 @@ func (*App) Start() error { return nil }
 func (*App) Stop() error  { return nil }
 
 func (a *App) Provision(ctx caddy.Context) error {
-	for _, p := range a.Providers {
-		if err := p.Provision(ctx); err != nil {
-			return err
+	a.providers = make(map[string]*Authenticator, len(a.Providers))
+
+	for k, p := range a.Providers {
+		au, err := p.CreateAuthorizer(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to create oidc provider '%s': %w", k, err)
 		}
+
+		a.providers[k] = au
 	}
+
 	return nil
 }

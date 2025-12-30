@@ -2,8 +2,10 @@ package caddy_oidc
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"time"
 
@@ -22,18 +24,16 @@ func init() {
 }
 
 var _ caddy.Module = (*OIDCProviderModule)(nil)
-var _ caddy.Provisioner = (*OIDCProviderModule)(nil)
 var _ caddyfile.Unmarshaler = (*OIDCProviderModule)(nil)
 
 // OIDCProviderModule holds the configuration for an OIDC provider
 type OIDCProviderModule struct {
-	IssuerURL   string   `json:"issuer_url"`
-	ClientID    string   `json:"client_id"`
-	SecretKey   string   `json:"secret_key"`
-	RedirectURI string   `json:"redirect_uri"`
-	Cookie      *Cookies `json:"cookie"`
-
-	data *Deferred[*Authorizer]
+	IssuerURL             string   `json:"issuer_url"`
+	ClientID              string   `json:"client_id"`
+	SecretKey             string   `json:"secret_key"`
+	RedirectURI           string   `json:"redirect_uri"`
+	Cookie                *Cookies `json:"cookie"`
+	TLSInsecureSkipVerify bool     `json:"tls_insecure_skip_verify"`
 }
 
 func (*OIDCProviderModule) CaddyModule() caddy.ModuleInfo {
@@ -50,6 +50,7 @@ func (*OIDCProviderModule) CaddyModule() caddy.ModuleInfo {
 	client_id <client_id>
 	redirect_uri <redirect_uri>
 	secret_key <secret_key>
+	tls_insecure_skip_verify
 	cookie <name> | {
 		name <name>
 		same_site <same_site>
@@ -88,6 +89,8 @@ func (m *OIDCProviderModule) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			if err := m.Cookie.UnmarshalCaddyfile(d); err != nil {
 				return err
 			}
+		case "tls_insecure_skip_verify":
+			m.TLSInsecureSkipVerify = true
 		default:
 			return d.Errf("unrecognized subdirective '%s'", d.Val())
 		}
@@ -97,11 +100,11 @@ func (m *OIDCProviderModule) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	return nil
 }
 
-// Provision initializes the OIDC verifier
-func (m *OIDCProviderModule) Provision(ctx caddy.Context) error {
+// CreateAuthorizer creates an Authenticator instance from this provider configuration.
+func (m *OIDCProviderModule) CreateAuthorizer(ctx caddy.Context) (*Authenticator, error) {
 	redirectUri, err := url.Parse(m.RedirectURI)
 	if err != nil {
-		return fmt.Errorf("invalid redirect_uri: %w", err)
+		return nil, fmt.Errorf("invalid redirect_uri: %w", err)
 	}
 
 	var repl = caddy.NewReplacer()
@@ -109,55 +112,69 @@ func (m *OIDCProviderModule) Provision(ctx caddy.Context) error {
 	m.SecretKey = repl.ReplaceAll(m.SecretKey, "")
 
 	if l := len(m.SecretKey); l != 32 && l != 64 {
-		return fmt.Errorf("secret_key must be 32 or 64 bytes, got %d", l)
+		return nil, fmt.Errorf("secret_key must be 32 or 64 bytes, got %d", l)
 	}
 
-	m.data = Defer(func() (*Authorizer, error) {
-		// TODO input validation, but it can't be done during the regular caddy Validate lifecycle at the moment
+	log := ctx.Logger(m)
 
-		var data = &Authorizer{
-			log:         ctx.Logger(m),
-			redirectUri: redirectUri,
-			clock:       time.Now,
-			cookies:     securecookie.New([]byte(m.SecretKey), []byte(m.SecretKey)),
-			cookie:      m.Cookie,
+	// Set up a retryable HTTP client to inject into the provider for discovery.
+	retryClient := retryablehttp.NewClient()
+	retryClient.Logger = slog.New(zapslog.NewHandler(log.Core(), zapslog.WithName(log.Name()), zapslog.WithCaller(false)))
+	retryClient.RetryMax = 5
+
+	// Copy the default settings from HTTP DefaultTransport
+	retryClientTransport := http.DefaultTransport.(*http.Transport).Clone()
+	if m.TLSInsecureSkipVerify {
+		if retryClientTransport.TLSClientConfig == nil {
+			retryClientTransport.TLSClientConfig = new(tls.Config)
 		}
 
-		if data.cookie == nil {
-			data.cookie = new(Cookies)
-			*data.cookie = DefaultCookieOptions
-		}
+		retryClientTransport.TLSClientConfig.InsecureSkipVerify = true
+	}
 
-		data.log.Debug("performing OIDC discovery")
+	retryClient.HTTPClient = &http.Client{
+		Transport: retryClientTransport,
+	}
 
-		// Set up a retryable HTTP client to inject into the provider for discovery.
-		retryClient := retryablehttp.NewClient()
-		retryClient.Logger = slog.New(zapslog.NewHandler(data.log.Core(), zapslog.WithName(data.log.Name()), zapslog.WithCaller(false)))
-		retryClient.RetryMax = 5
-		providerCtx := context.WithValue(ctx.Context, oauth2.HTTPClient, retryClient.StandardClient())
+	var authorizer = &Authenticator{
+		log:         log,
+		redirectUri: redirectUri,
+		httpClient:  retryClient.StandardClient(),
+		clock:       time.Now,
+		cookies:     securecookie.New([]byte(m.SecretKey), []byte(m.SecretKey)),
+		cookie:      m.Cookie,
+	}
 
-		provider, err := oidc.NewProvider(providerCtx, m.IssuerURL)
-		if err != nil {
-			return nil, fmt.Errorf("oidc discovery failed: %w", err)
-		}
+	if authorizer.cookie == nil {
+		authorizer.cookie = new(Cookies)
+		*authorizer.cookie = DefaultCookieOptions
+	}
 
-		data.log.Debug("OIDC provider discovery successful", zap.Any("discovery", provider.Endpoint()))
+	authorizer.log.Debug("performing OIDC discovery")
 
-		data.verifier = provider.Verifier(&oidc.Config{
-			ClientID: m.ClientID,
-			Now:      data.clock,
-		})
+	providerCtx := context.WithValue(ctx.Context, oauth2.HTTPClient, authorizer.httpClient)
+	provider, err := oidc.NewProvider(providerCtx, m.IssuerURL)
+	if err != nil {
+		return nil, fmt.Errorf("oidc discovery failed: %w", err)
+	}
 
-		data.oauth2 = &oauth2.Config{
+	authorizer.log.Debug("OIDC provider discovery successful", zap.Any("discovery", provider.Endpoint()))
+
+	authorizer.verifier = provider.Verifier(&oidc.Config{
+		ClientID: m.ClientID,
+		Now:      authorizer.clock,
+	})
+
+	authorizer.oauth2 = &oauth2ConfigWithHTTPClient{
+		httpClient: authorizer.httpClient,
+		Config: &oauth2.Config{
 			ClientID:    m.ClientID,
 			RedirectURL: redirectUri.String(),
 			Endpoint:    provider.Endpoint(),
 			// TODO configurable (offline access always?)
 			Scopes: []string{oidc.ScopeOpenID},
-		}
+		},
+	}
 
-		return data, nil
-	})
-
-	return nil
+	return authorizer, nil
 }

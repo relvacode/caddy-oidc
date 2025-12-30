@@ -29,10 +29,10 @@ type OIDCMiddleware struct {
 	Provider string    `json:"provider"`
 	Policies PolicySet `json:"policies"`
 
-	m *Deferred[*Authorizer]
+	au *Authenticator
 }
 
-func (d *OIDCMiddleware) CaddyModule() caddy.ModuleInfo {
+func (mw *OIDCMiddleware) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.handlers.oidc",
 		New: func() caddy.Module { return new(OIDCMiddleware) },
@@ -47,14 +47,14 @@ oidc example {
 	}
 }
 */
-func (d *OIDCMiddleware) UnmarshalCaddyfile(dis *caddyfile.Dispenser) error {
+func (mw *OIDCMiddleware) UnmarshalCaddyfile(dis *caddyfile.Dispenser) error {
 	for dis.Next() {
 		if !dis.NextArg() {
 			return dis.ArgErr()
 		}
-		d.Provider = dis.Val()
+		mw.Provider = dis.Val()
 
-		err := d.Policies.UnmarshalCaddyfile(dis)
+		err := mw.Policies.UnmarshalCaddyfile(dis)
 		if err != nil {
 			return err
 		}
@@ -63,7 +63,7 @@ func (d *OIDCMiddleware) UnmarshalCaddyfile(dis *caddyfile.Dispenser) error {
 	return nil
 }
 
-func (d *OIDCMiddleware) Provision(ctx caddy.Context) error {
+func (mw *OIDCMiddleware) Provision(ctx caddy.Context) error {
 	val, err := ctx.App(ModuleID)
 	if err != nil {
 		return err
@@ -71,40 +71,35 @@ func (d *OIDCMiddleware) Provision(ctx caddy.Context) error {
 
 	app := val.(*App)
 
-	p, ok := app.Providers[d.Provider]
+	au, ok := app.providers[mw.Provider]
 	if !ok {
-		return fmt.Errorf("oidc provider '%s' not configured", d.Provider)
+		return fmt.Errorf("oidc provider '%s' not configured", mw.Provider)
 	}
 
-	d.m = p.data
+	mw.au = au
 
 	return nil
 }
 
-func (d *OIDCMiddleware) Validate() error {
-	if len(d.Policies) == 0 {
+func (mw *OIDCMiddleware) Validate() error {
+	if len(mw.Policies) == 0 {
 		return errors.New("at least one policy must be specified")
 	}
 
-	if !d.Policies.ContainsAllow() {
+	if !mw.Policies.ContainsAllow() {
 		return errors.New("no authorization policy is configured to allow access, all requests will be denied without at least one allow policy")
 	}
 
 	return nil
 }
 
-func (d *OIDCMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	pr, err := d.m.Get()
-	if err != nil {
-		return err
-	}
-
+func (mw *OIDCMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	// Check if the request is an OAuth callback
-	if r.Method == http.MethodGet && r.URL.Path == pr.redirectUri.Path {
-		return pr.HandleOauthCallback(rw, r, next)
+	if r.Method == http.MethodGet && r.URL.Path == mw.au.redirectUri.Path {
+		return mw.au.HandleCallback(rw, r, next)
 	}
 
-	s, err := pr.Authenticate(r)
+	s, err := mw.au.Authenticate(r)
 	if err != nil {
 		return err
 	}
@@ -115,7 +110,7 @@ func (d *OIDCMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request, next
 		}
 	}
 
-	e, err := d.Policies.Evaluate(r, s)
+	e, err := mw.Policies.Evaluate(r, s)
 	if err != nil {
 		return err
 	}
@@ -130,7 +125,7 @@ func (d *OIDCMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request, next
 		// If anonymous, then start the authorization flow.
 		// In other words, if not authenticated and not otherwise explicitly denied, then start the authorization flow.
 		if s.Anonymous && r.Method == http.MethodGet {
-			return pr.StartLogin(rw, r)
+			return mw.au.StartLogin(rw, r)
 		}
 
 		return caddyhttp.Error(http.StatusForbidden, ErrAccessDenied)
