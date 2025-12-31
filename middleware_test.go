@@ -101,7 +101,7 @@ func TestOIDCMiddleware_ServeHTTP_WithoutAuth(t *testing.T) {
 	assert.Equal(t, "code", redir.Query().Get("response_type"))
 	assert.Equal(t, "xyz", redir.Query().Get("client_id"))
 	assert.NotEmpty(t, redir.Query().Get("state"))
-	assert.Equal(t, "http://localhost/oauth/callback", redir.Query().Get("redirect_uri"))
+	assert.Equal(t, "http://example.com/oauth2/callback", redir.Query().Get("redirect_uri"))
 
 	c, err := http.ParseSetCookie(w.Header().Get("Set-Cookie"))
 	if assert.NoError(t, err) {

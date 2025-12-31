@@ -24,6 +24,8 @@ func init() {
 	caddy.RegisterModule(new(OIDCProviderModule))
 }
 
+const DefaultRedirectUriPath = "/oauth2/callback"
+
 var _ caddy.Module = (*OIDCProviderModule)(nil)
 var _ caddy.Provisioner = (*OIDCProviderModule)(nil)
 var _ caddy.Validator = (*OIDCProviderModule)(nil)
@@ -53,7 +55,7 @@ func (*OIDCProviderModule) CaddyModule() caddy.ModuleInfo {
 {
 	issuer <issuer>
 	client_id <client_id>
-	redirect_uri <redirect_uri>
+	redirect_uri [<redirect_uri>]
 	secret_key <secret_key>
 	tls_insecure_skip_verify
 	discovery_url <discovery_url>
@@ -132,6 +134,10 @@ func (m *OIDCProviderModule) Provision(_ caddy.Context) error {
 		m.Username = UidSubClaimKey
 	}
 
+	if m.RedirectURI == "" {
+		m.RedirectURI = DefaultRedirectUriPath
+	}
+
 	return nil
 }
 
@@ -187,10 +193,11 @@ func (m *OIDCProviderModule) Create(ctx caddy.Context) (*Authenticator, error) {
 		Transport: retryClientTransport,
 	}
 
+	httpClient := retryClient.StandardClient()
+
 	var authorizer = &Authenticator{
 		log:         log,
 		redirectUri: redirectUri,
-		httpClient:  retryClient.StandardClient(),
 		uid:         m.Username,
 		clock:       time.Now,
 		cookies:     securecookie.New([]byte(m.SecretKey), []byte(m.SecretKey)),
@@ -199,7 +206,7 @@ func (m *OIDCProviderModule) Create(ctx caddy.Context) (*Authenticator, error) {
 
 	authorizer.log.Debug("performing OIDC discovery")
 
-	providerCtx := context.WithValue(ctx, oauth2.HTTPClient, authorizer.httpClient)
+	providerCtx := context.WithValue(ctx, oauth2.HTTPClient, httpClient)
 	provider, err := oidc.NewProvider(providerCtx, m.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery failed: %w", err)
@@ -212,18 +219,13 @@ func (m *OIDCProviderModule) Create(ctx caddy.Context) (*Authenticator, error) {
 		Now:      authorizer.clock,
 	})
 
-	authorizer.userInfo = &oidcProviderWithHttpClient{
-		httpClient: authorizer.httpClient,
-		provider:   provider,
-	}
-
+	authorizer.userInfo = provider
 	authorizer.oauth2 = &oauth2ConfigWithHTTPClient{
-		httpClient: authorizer.httpClient,
+		httpClient: httpClient,
 		Config: &oauth2.Config{
-			ClientID:    m.ClientID,
-			RedirectURL: redirectUri.String(),
-			Endpoint:    provider.Endpoint(),
-			Scopes:      m.Scope,
+			ClientID: m.ClientID,
+			Endpoint: provider.Endpoint(),
+			Scopes:   m.Scope,
 		},
 	}
 

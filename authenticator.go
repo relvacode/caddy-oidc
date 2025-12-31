@@ -45,22 +45,11 @@ type UserInfoClient interface {
 	UserInfo(ctx context.Context, tokenSource oauth2.TokenSource) (*oidc.UserInfo, error)
 }
 
-type oidcProviderWithHttpClient struct {
-	httpClient *http.Client
-	provider   *oidc.Provider
-}
-
-func (c *oidcProviderWithHttpClient) UserInfo(ctx context.Context, tokenSource oauth2.TokenSource) (*oidc.UserInfo, error) {
-	ctx = context.WithValue(ctx, oauth2.HTTPClient, c.httpClient)
-	return c.provider.UserInfo(ctx, tokenSource)
-}
-
 // Authenticator holds the built configuration for an OIDC provider and authentication logic
 type Authenticator struct {
 	log         *zap.Logger
 	redirectUri *url.URL
 	clock       func() time.Time
-	httpClient  *http.Client
 	verifier    *oidc.IDTokenVerifier
 	uid         UidClaim
 	userInfo    UserInfoClient
@@ -148,8 +137,28 @@ func (au *Authenticator) Authenticate(r *http.Request) (*Session, error) {
 	return AnonymousSession, nil
 }
 
+// GetAbsRedirectUri returns the absolute redirect URI, resolving it relative to the request URL if necessary.
+func (au *Authenticator) GetAbsRedirectUri(r *http.Request) string {
+	if au.redirectUri.IsAbs() {
+		return au.redirectUri.String()
+	}
+
+	// Caddy should be sanitising X-Forwarded-Proto headers
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+
+	var u = *r.URL
+	u.Scheme = scheme
+	u.Host = r.Host
+
+	return u.ResolveReference(au.redirectUri).String()
+}
+
 // StartLogin starts the authorization flow by setting the state cookie and redirecting to the authorization endpoint.
 // The state cookie is in the format of `<cookie_name>|<state>`, with the value containing the PKCE code verifier.
+// The OAuth2 redirect URI is set to the configured redirect URI made absolute relative to the request URL.
 func (au *Authenticator) StartLogin(w http.ResponseWriter, r *http.Request) error {
 	var (
 		state             = uuid.New().String()
@@ -171,6 +180,7 @@ func (au *Authenticator) StartLogin(w http.ResponseWriter, r *http.Request) erro
 
 	authCodeUrl := au.oauth2.AuthCodeURL(state,
 		oauth2.S256ChallengeOption(pkceVerifier),
+		oauth2.SetAuthURLParam("redirect_uri", au.GetAbsRedirectUri(r)),
 	)
 
 	http.Redirect(w, r, authCodeUrl, http.StatusFound)
@@ -207,8 +217,11 @@ func (au *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Exchange code for tokens
-	oauth2Ctx := context.WithValue(r.Context(), oauth2.HTTPClient, au.httpClient)
-	response, err := au.oauth2.Exchange(oauth2Ctx, r.FormValue("code"), oauth2.VerifierOption(csrfToken.PKCEVerifier))
+	response, err := au.oauth2.Exchange(r.Context(), r.FormValue("code"),
+		oauth2.VerifierOption(csrfToken.PKCEVerifier),
+		oauth2.SetAuthURLParam("redirect_uri", au.GetAbsRedirectUri(r)),
+	)
+
 	if err != nil {
 		return caddyhttp.Error(http.StatusBadRequest, fmt.Errorf("failed to exchange token: %w", err))
 	}

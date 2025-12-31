@@ -22,9 +22,7 @@ func GenerateTestAuthenticator() *Authenticator {
 			return time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 		},
 		redirectUri: &url.URL{
-			Scheme: "http",
-			Host:   "localhost",
-			Path:   "/oauth/callback",
+			Path: "/oauth2/callback",
 		},
 		log:     zap.NewNop(),
 		uid:     UidSubClaimKey,
@@ -34,8 +32,7 @@ func GenerateTestAuthenticator() *Authenticator {
 			SupportedSigningAlgs: []string{"none"},
 		}),
 		oauth2: &oauth2.Config{
-			ClientID:    "xyz",
-			RedirectURL: "http://localhost/oauth/callback",
+			ClientID: "xyz",
 			Endpoint: oauth2.Endpoint{
 				AuthURL:  "http://openid/example/authorize",
 				TokenURL: "http://openid/example/token",
@@ -44,7 +41,30 @@ func GenerateTestAuthenticator() *Authenticator {
 	}
 }
 
-func TestAuthorizer_Authenticate_WithBearerAuthentication(t *testing.T) {
+func TestAuthenticator_StartLoginRedirectUrl(t *testing.T) {
+	pr := GenerateTestAuthenticator()
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Host = "localhost"
+	r.Header.Set("X-Forwarded-Proto", "https")
+
+	w := httptest.NewRecorder()
+
+	err := pr.StartLogin(w, r)
+	assert.NoError(t, err)
+
+	redirectUrl, err := url.Parse(w.Header().Get("Location"))
+	assert.NoError(t, err)
+
+	postRedirectUrl, err := url.Parse(redirectUrl.Query().Get("redirect_uri"))
+	assert.NoError(t, err)
+
+	assert.Equal(t, "https", postRedirectUrl.Scheme)
+	assert.Equal(t, "localhost", postRedirectUrl.Host)
+	assert.Equal(t, "/oauth2/callback", postRedirectUrl.Path)
+}
+
+func TestAuthenticator_Authenticate_WithBearerAuthentication(t *testing.T) {
 	pr := GenerateTestAuthenticator()
 
 	r := httptest.NewRequest("GET", "/", nil)
@@ -56,7 +76,7 @@ func TestAuthorizer_Authenticate_WithBearerAuthentication(t *testing.T) {
 	}
 }
 
-func TestAuthorizer_Authenticate_WithSessionCookie(t *testing.T) {
+func TestAuthenticator_Authenticate_WithSessionCookie(t *testing.T) {
 	pr := GenerateTestAuthenticator()
 
 	r := httptest.NewRequest("GET", "/", nil)
@@ -73,7 +93,7 @@ func TestAuthorizer_Authenticate_WithSessionCookie(t *testing.T) {
 	}
 }
 
-func TestAuthorizer_Authenticate_WithSessionCookie_SignedByOther(t *testing.T) {
+func TestAuthenticator_Authenticate_WithSessionCookie_SignedByOther(t *testing.T) {
 	pr := GenerateTestAuthenticator()
 
 	r := httptest.NewRequest("GET", "/", nil)
@@ -95,7 +115,7 @@ func TestAuthorizer_Authenticate_WithSessionCookie_SignedByOther(t *testing.T) {
 	}
 }
 
-func TestAuthorizer_SessionFromCookie(t *testing.T) {
+func TestAuthenticator_SessionFromCookie(t *testing.T) {
 	pr := GenerateTestAuthenticator()
 
 	r := httptest.NewRequest("GET", "/", nil)

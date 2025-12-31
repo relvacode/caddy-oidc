@@ -15,7 +15,7 @@ staticClients:
   - id: xyz
     public: true
     redirectURIs:
-      - 'http://caddy/oauth/callback'
+      - 'http://caddy/oauth2/callback'
     name: 'Caddy Test App'
 
 # Static users for testing (avoids needing an external connector)
