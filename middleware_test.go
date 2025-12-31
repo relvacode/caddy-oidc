@@ -13,6 +13,28 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestShouldStartLogin(t *testing.T) {
+	t.Run("incorrect method", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		assert.False(t, ShouldStartLogin(r))
+	})
+	t.Run("can't accept", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Header.Set("Accept", "application/json")
+		assert.False(t, ShouldStartLogin(r))
+	})
+	t.Run("Sec-Fetch-Dest", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Header.Set("Sec-Fetch-Dest", "document")
+		assert.True(t, ShouldStartLogin(r))
+	})
+	t.Run("accept HTML", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Header.Set("Accept", "text/html")
+		assert.True(t, ShouldStartLogin(r))
+	})
+}
+
 func TestOIDCMiddleware_UnmarshalCaddyfile(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -83,6 +105,7 @@ func TestOIDCMiddleware_ServeHTTP_WithoutAuth(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Sec-Fetch-Dest", "document")
 	h := new(TestHandler)
 
 	err := auth.ServeHTTP(w, r, h)

@@ -9,6 +9,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/securecookie v1.1.2
 	github.com/hashicorp/go-retryablehttp v0.7.8
+	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
 	github.com/stretchr/testify v1.11.1
 	go.uber.org/zap v1.27.1
 	go.uber.org/zap/exp v0.3.0
@@ -76,7 +77,6 @@ require (
 	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/go-ps v1.0.0 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
-	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect

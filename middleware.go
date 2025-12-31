@@ -9,6 +9,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/munnerz/goautoneg"
 )
 
 func init() {
@@ -93,6 +94,23 @@ func (mw *OIDCMiddleware) Validate() error {
 	return nil
 }
 
+// ShouldStartLogin returns true if the request should start the authorization flow on a failed authentication attempt
+// based on if the request is likely coming from a browser.
+func ShouldStartLogin(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+
+	dest := r.Header.Get("Sec-Fetch-Dest")
+	if dest != "" {
+		return dest == "document" || dest == "iframe"
+	}
+
+	// Fallback for older browsers: check Accept header for HTML.
+	// If the browser doesn't send Sec-Fetch-Dest, we check if it's looking for HTML.
+	return goautoneg.Negotiate(r.Header.Get("Accept"), []string{"text/html"}) == "text/html"
+}
+
 func (mw *OIDCMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	au, err := mw.au.Get(r.Context())
 	if err != nil {
@@ -129,7 +147,7 @@ func (mw *OIDCMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request, nex
 		// If the evaluation result is an implicit reject, then check if the session is anonymous.
 		// If anonymous, then start the authorization flow.
 		// In other words, if not authenticated and not otherwise explicitly denied, then start the authorization flow.
-		if s.Anonymous && r.Method == http.MethodGet {
+		if s.Anonymous && ShouldStartLogin(r) {
 			return au.StartLogin(rw, r)
 		}
 
