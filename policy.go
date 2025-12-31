@@ -188,6 +188,7 @@ type RequestMatcher struct {
 	User      []Wildcard      `json:"user,omitempty"`
 	Client    []IpRange       `json:"client,omitempty"`
 	Query     []*RequestValue `json:"query,omitempty"`
+	Header    []*RequestValue `json:"header,omitempty"`
 }
 
 func (p *RequestMatcher) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
@@ -220,6 +221,18 @@ func (p *RequestMatcher) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				}
 
 				p.Query = append(p.Query, &rv)
+			}
+		case "header":
+			for d.NextArg() {
+				d.Prev()
+
+				var rv RequestValue
+				err := rv.UnmarshalCaddyfile(d)
+				if err != nil {
+					return err
+				}
+
+				p.Header = append(p.Header, &rv)
 			}
 		}
 	}
@@ -260,6 +273,9 @@ func (p *RequestMatcher) Evaluate(r *http.Request, s *Session) (bool, error) {
 	}
 
 	if len(p.Query) > 0 && !matchOne(p.Query, r.URL.Query(), (*RequestValue).MatchValues) {
+		return false, nil
+	}
+	if len(p.Header) > 0 && !matchOne(p.Header, r.Header, (*RequestValue).MatchHeader) {
 		return false, nil
 	}
 

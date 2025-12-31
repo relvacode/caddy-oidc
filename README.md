@@ -147,3 +147,15 @@ allow {
   query api-key=xyz public
 }
 ```
+
+#### header
+
+The `header` rule can be used to match requests based on HTTP header values, either by existence or exact value.
+The header name is case-insensitive and normalized to the canonical form specified in RFC 7230.
+
+```caddyfile
+# Allow requests having X-Api-Key=xyz
+allow {
+  header X-Api-Key=xyz
+}
+```

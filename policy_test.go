@@ -80,10 +80,22 @@ func TestRequestMatcher_UnmarshalCaddyfile(t *testing.T) {
 		{
 			name: "query",
 			input: `{
-query foo=bar bar
-}`,
+				query foo=bar bar
+			}`,
 			expect: RequestMatcher{
 				Query: []*RequestValue{
+					{Name: "foo", Value: &bar},
+					{Name: "bar", Value: nil},
+				},
+			},
+		},
+		{
+			name: "header",
+			input: `{
+				header foo=bar bar
+			}`,
+			expect: RequestMatcher{
+				Header: []*RequestValue{
 					{Name: "foo", Value: &bar},
 					{Name: "bar", Value: nil},
 				},
@@ -230,6 +242,54 @@ func TestPolicySet_Evaluate(t *testing.T) {
 			},
 			expect: RejectImplicit,
 		},
+		{
+			name: "allow header where exists",
+			input: `{
+				allow {
+					header x-api-key
+				}
+			}`,
+			session: &Session{
+				Uid: "test@example.com",
+			},
+			expect: Permit,
+		},
+		{
+			name: "allow header with value",
+			input: `{
+				allow {
+					header x-api-key=xyz
+				}
+			}`,
+			session: &Session{
+				Uid: "test@example.com",
+			},
+			expect: Permit,
+		},
+		{
+			name: "allow header with value (canonical)",
+			input: `{
+				allow {
+					header X-Api-Key=xyz
+				}
+			}`,
+			session: &Session{
+				Uid: "test@example.com",
+			},
+			expect: Permit,
+		},
+		{
+			name: "deny query not equal",
+			input: `{
+				allow {
+					query x-api-key=xyz
+				}
+			}`,
+			session: &Session{
+				Uid: "test@example.com",
+			},
+			expect: RejectImplicit,
+		},
 	}
 
 	for _, tt := range tests {
@@ -242,6 +302,7 @@ func TestPolicySet_Evaluate(t *testing.T) {
 			assert.NoError(t, err)
 
 			r := httptest.NewRequest("GET", "/?foo=bar", nil)
+			r.Header.Set("X-Api-Key", "xyz")
 			r = r.WithContext(context.WithValue(r.Context(), caddyhttp.VarsCtxKey, map[string]any{
 				caddyhttp.ClientIPVarKey: "127.0.0.1",
 			}))
