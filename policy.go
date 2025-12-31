@@ -2,6 +2,7 @@ package caddy_oidc
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"net/netip"
@@ -172,7 +173,8 @@ func (rv *RequestValue) MatchValues(values url.Values) bool {
 	if rv.Value == nil {
 		return values.Has(rv.Name)
 	}
-	return values.Get(rv.Name) == *rv.Value
+
+	return subtle.ConstantTimeCompare([]byte(values.Get(rv.Name)), []byte(*rv.Value)) == 1
 }
 
 func (rv *RequestValue) MatchHeader(header http.Header) bool {
@@ -180,7 +182,8 @@ func (rv *RequestValue) MatchHeader(header http.Header) bool {
 		_, ok := header[http.CanonicalHeaderKey(rv.Name)]
 		return ok
 	}
-	return header.Get(rv.Name) == *rv.Value
+
+	return subtle.ConstantTimeCompare([]byte(header.Get(rv.Name)), []byte(*rv.Value)) == 1
 }
 
 type RequestMatcher struct {
