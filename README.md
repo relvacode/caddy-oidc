@@ -136,3 +136,14 @@ This allows clients to make anonymous requests to the server where desired.
 
 The `client` rule can be used to match requests from a specific IP address or subnet.
 Supplied as a space-separated list of CIDR notation subnets or IP addresses.
+
+#### query
+
+The `query` rule can be used to match requests based on query parameters, either by existence or exact value.
+
+```caddyfile
+# Allow requests having api-key=xyz and/or public
+allow {
+  query api-key=xyz public
+}
+```

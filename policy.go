@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"net/url"
+	"strings"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 )
@@ -130,10 +132,62 @@ func (ir *IpRange) MarshalText() ([]byte, error) {
 	return []byte(ir.Prefix.String()), nil
 }
 
+type RequestValue struct {
+	Name  string  `json:"name"`
+	Value *string `json:"value,omitempty"`
+}
+
+func (rv *RequestValue) String() string {
+	var s strings.Builder
+	s.WriteString(rv.Name)
+	if rv.Value != nil {
+		s.WriteString("=")
+		s.WriteString(*rv.Value)
+	}
+
+	return s.String()
+}
+
+// UnmarshalCaddyfile sets up a RequestValue from Caddyfile tokens.
+/* syntax
+name[=<value]
+*/
+func (rv *RequestValue) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	if !d.NextArg() {
+		return d.ArgErr()
+	}
+
+	rv.Name = d.Val()
+
+	name, value, ok := strings.Cut(d.Val(), "=")
+	if ok {
+		rv.Name = name
+		rv.Value = &value
+	}
+
+	return nil
+}
+
+func (rv *RequestValue) MatchValues(values url.Values) bool {
+	if rv.Value == nil {
+		return values.Has(rv.Name)
+	}
+	return values.Get(rv.Name) == *rv.Value
+}
+
+func (rv *RequestValue) MatchHeader(header http.Header) bool {
+	if rv.Value == nil {
+		_, ok := header[http.CanonicalHeaderKey(rv.Name)]
+		return ok
+	}
+	return header.Get(rv.Name) == *rv.Value
+}
+
 type RequestMatcher struct {
-	Anonymous bool       `json:"anonymous,omitempty"`
-	User      []Wildcard `json:"user,omitempty"`
-	Client    []IpRange  `json:"client,omitempty"`
+	Anonymous bool            `json:"anonymous,omitempty"`
+	User      []Wildcard      `json:"user,omitempty"`
+	Client    []IpRange       `json:"client,omitempty"`
+	Query     []*RequestValue `json:"query,omitempty"`
 }
 
 func (p *RequestMatcher) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
@@ -155,10 +209,32 @@ func (p *RequestMatcher) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 
 				p.Client = append(p.Client, ir)
 			}
+		case "query":
+			for d.NextArg() {
+				d.Prev()
+
+				var rv RequestValue
+				err := rv.UnmarshalCaddyfile(d)
+				if err != nil {
+					return err
+				}
+
+				p.Query = append(p.Query, &rv)
+			}
 		}
 	}
 
 	return nil
+}
+
+// matchOne returns true if any element in the match slice matches the find value.
+func matchOne[T any, S ~[]T, V any](match S, find V, predicate func(m T, v V) bool) bool {
+	for _, m := range match {
+		if predicate(m, find) {
+			return true
+		}
+	}
+	return false
 }
 
 // Evaluate evaluates the policy and returns true if the request is allowed.
@@ -168,18 +244,8 @@ func (p *RequestMatcher) Evaluate(r *http.Request, s *Session) (bool, error) {
 		return false, nil
 	}
 
-	if len(p.User) > 0 {
-		var hasUser = false
-		for _, u := range p.User {
-			if u.Match(s.Uid) {
-				hasUser = true
-				break
-			}
-		}
-
-		if !hasUser {
-			return false, nil
-		}
+	if len(p.User) > 0 && !matchOne(p.User, s.Uid, Wildcard.Match) {
+		return false, nil
 	}
 
 	if len(p.Client) > 0 {
@@ -188,17 +254,13 @@ func (p *RequestMatcher) Evaluate(r *http.Request, s *Session) (bool, error) {
 			return false, err
 		}
 
-		var hasClient = false
-		for _, ir := range p.Client {
-			if ir.Contains(client) {
-				hasClient = true
-				break
-			}
-		}
-
-		if !hasClient {
+		if !matchOne(p.Client, client, IpRange.Contains) {
 			return false, nil
 		}
+	}
+
+	if len(p.Query) > 0 && !matchOne(p.Query, r.URL.Query(), (*RequestValue).MatchValues) {
+		return false, nil
 	}
 
 	return true, nil

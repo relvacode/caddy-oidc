@@ -39,6 +39,7 @@ func TestWildcard_Match(t *testing.T) {
 }
 
 func TestRequestMatcher_UnmarshalCaddyfile(t *testing.T) {
+	var bar = "bar"
 	tests := []struct {
 		name      string
 		input     string
@@ -73,6 +74,18 @@ func TestRequestMatcher_UnmarshalCaddyfile(t *testing.T) {
 					{Prefix: netip.MustParsePrefix("192.168.0.0/24")},
 					{Prefix: netip.MustParsePrefix("10.0.0.0/8")},
 					{Prefix: netip.MustParsePrefix("1.1.1.1/32")},
+				},
+			},
+		},
+		{
+			name: "query",
+			input: `{
+query foo=bar bar
+}`,
+			expect: RequestMatcher{
+				Query: []*RequestValue{
+					{Name: "foo", Value: &bar},
+					{Name: "bar", Value: nil},
 				},
 			},
 		},
@@ -181,6 +194,42 @@ func TestPolicySet_Evaluate(t *testing.T) {
 			},
 			expect: Permit,
 		},
+		{
+			name: "allow query where exists",
+			input: `{
+				allow {
+					query foo
+				}
+			}`,
+			session: &Session{
+				Uid: "test@example.com",
+			},
+			expect: Permit,
+		},
+		{
+			name: "allow query with value",
+			input: `{
+				allow {
+					query foo=bar
+				}
+			}`,
+			session: &Session{
+				Uid: "test@example.com",
+			},
+			expect: Permit,
+		},
+		{
+			name: "deny query not equal",
+			input: `{
+				allow {
+					query foo=baz
+				}
+			}`,
+			session: &Session{
+				Uid: "test@example.com",
+			},
+			expect: RejectImplicit,
+		},
 	}
 
 	for _, tt := range tests {
@@ -192,7 +241,7 @@ func TestPolicySet_Evaluate(t *testing.T) {
 			err := ps.UnmarshalCaddyfile(d)
 			assert.NoError(t, err)
 
-			r := httptest.NewRequest("GET", "/", nil)
+			r := httptest.NewRequest("GET", "/?foo=bar", nil)
 			r = r.WithContext(context.WithValue(r.Context(), caddyhttp.VarsCtxKey, map[string]any{
 				caddyhttp.ClientIPVarKey: "127.0.0.1",
 			}))
