@@ -33,7 +33,7 @@ func TestCookieOptions_UnmarshalCaddyfile(t *testing.T) {
 			}`,
 			expect: Cookies{
 				Name:     "block_cookie",
-				SameSite: http.SameSiteStrictMode,
+				SameSite: SameSite{http.SameSiteStrictMode},
 				Insecure: true,
 				Domain:   "example.com",
 				Path:     "/auth",

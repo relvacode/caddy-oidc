@@ -69,7 +69,7 @@ func TestOIDCProvider_UnmarshalCaddyfile(t *testing.T) {
 				Username:              "email",
 				Cookie: &Cookies{
 					Name:     "session_id",
-					SameSite: http.SameSiteStrictMode,
+					SameSite: SameSite{http.SameSiteStrictMode},
 					Insecure: true,
 					Path:     "/",
 				},

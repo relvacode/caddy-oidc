@@ -36,11 +36,11 @@ type OIDCProviderModule struct {
 	Issuer                string   `json:"issuer"`
 	ClientID              string   `json:"client_id"`
 	SecretKey             string   `json:"secret_key"`
-	RedirectURI           string   `json:"redirect_uri"`
-	TLSInsecureSkipVerify bool     `json:"tls_insecure_skip_verify"`
-	Cookie                *Cookies `json:"cookie"`
-	Scope                 []string `json:"scope"`
-	Username              UidClaim `json:"username"`
+	RedirectURI           string   `json:"redirect_uri,omitempty"`
+	TLSInsecureSkipVerify bool     `json:"tls_insecure_skip_verify,omitempty"`
+	Cookie                *Cookies `json:"cookie,omitempty"`
+	Scope                 []string `json:"scope,omitempty"`
+	Username              UidClaim `json:"username,omitempty"`
 }
 
 func (*OIDCProviderModule) CaddyModule() caddy.ModuleInfo {

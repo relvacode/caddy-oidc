@@ -16,6 +16,34 @@ const (
 	Deny
 )
 
+func (a *Action) String() string {
+	switch *a {
+	case Allow:
+		return "allow"
+	case Deny:
+		return "deny"
+	default:
+		return fmt.Sprintf("unknown action %d", *a)
+	}
+}
+
+func (a *Action) MarshalText() ([]byte, error) {
+	return []byte(a.String()), nil
+}
+
+func (a *Action) UnmarshalText(text []byte) error {
+	switch string(text) {
+	case "allow":
+		*a = Allow
+	case "deny":
+		*a = Deny
+	default:
+		return fmt.Errorf("unrecognized action '%s'", text)
+	}
+
+	return nil
+}
+
 type Wildcard string
 
 func (w Wildcard) Match(s string) bool {

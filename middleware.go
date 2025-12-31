@@ -64,7 +64,7 @@ func (mw *OIDCMiddleware) UnmarshalCaddyfile(dis *caddyfile.Dispenser) error {
 }
 
 func (mw *OIDCMiddleware) Provision(ctx caddy.Context) error {
-	val, err := ctx.App(ModuleID)
+	val, err := ctx.AppIfConfigured(ModuleID)
 	if err != nil {
 		return err
 	}

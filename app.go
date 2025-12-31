@@ -1,6 +1,7 @@
 package caddy_oidc
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/caddyserver/caddy/v2"
@@ -10,7 +11,7 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 )
 
-const ModuleID = "oidc.relvacode.github.com"
+const ModuleID = "oidc"
 
 func init() {
 	caddy.RegisterModule(new(App))
@@ -18,13 +19,16 @@ func init() {
 }
 
 func parseGlobalConfig(d *caddyfile.Dispenser, prev any) (any, error) {
-	var app *App
+	var app App
 
 	switch prev := prev.(type) {
-	case *App:
-		app = prev
+	case httpcaddyfile.App:
+		err := json.Unmarshal(prev.Value, &app)
+		if err != nil {
+			return nil, err
+		}
 	case nil:
-		app = &App{Providers: make(map[string]*OIDCProviderModule)}
+		app.Providers = make(map[string]*OIDCProviderModule)
 	default:
 		return nil, fmt.Errorf("conflicting global parser option for the oidc directive: %T", prev)
 	}
@@ -46,7 +50,7 @@ func parseGlobalConfig(d *caddyfile.Dispenser, prev any) (any, error) {
 
 	return httpcaddyfile.App{
 		Name:  ModuleID,
-		Value: caddyconfig.JSON(app, nil),
+		Value: caddyconfig.JSON(&app, nil),
 	}, nil
 }
 

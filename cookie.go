@@ -2,6 +2,7 @@ package caddy_oidc
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/caddyserver/caddy/v2"
@@ -10,21 +11,84 @@ import (
 
 var DefaultCookieOptions = Cookies{
 	Name:     "caddy",
-	SameSite: http.SameSiteLaxMode,
+	SameSite: SameSite{http.SameSiteLaxMode},
 	Insecure: false,
 	Domain:   "",
 	Path:     "/",
+}
+
+type SameSite struct {
+	http.SameSite
+}
+
+func (s *SameSite) UnmarshalText(text []byte) error {
+	switch text := string(text); text {
+	case "lax":
+		s.SameSite = http.SameSiteLaxMode
+	case "strict":
+		s.SameSite = http.SameSiteStrictMode
+	case "none":
+		s.SameSite = http.SameSiteNoneMode
+	default:
+		return fmt.Errorf("invalid same_site value: %s", text)
+	}
+
+	return nil
+}
+
+func (s *SameSite) String() string {
+	switch s.SameSite {
+	case http.SameSiteLaxMode:
+		return "lax"
+	case http.SameSiteStrictMode:
+		return "strict"
+	case http.SameSiteNoneMode:
+		return "none"
+	default:
+		return ""
+	}
+}
+
+func (s *SameSite) MarshalText() ([]byte, error) {
+	return []byte(s.String()), nil
+}
+
+func (s *SameSite) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	if !d.NextArg() {
+		return d.ArgErr()
+	}
+	switch d.Val() {
+	case "lax":
+		s.SameSite = http.SameSiteLaxMode
+	case "strict":
+		s.SameSite = http.SameSiteStrictMode
+	case "none":
+		s.SameSite = http.SameSiteNoneMode
+	default:
+		return fmt.Errorf("invalid same_site value: %s", d.Val())
+	}
+
+	return nil
+}
+
+func (s *SameSite) Validate() error {
+	switch s.SameSite {
+	case http.SameSiteLaxMode, http.SameSiteStrictMode, http.SameSiteNoneMode:
+		return nil
+	default:
+		return errors.New("same_site must be one of lax, strict, or none")
+	}
 }
 
 var _ caddyfile.Unmarshaler = (*Cookies)(nil)
 var _ caddy.Validator = (*Cookies)(nil)
 
 type Cookies struct {
-	Name     string        `json:"name"`
-	SameSite http.SameSite `json:"same_site"`
-	Insecure bool          `json:"insecure"`
-	Domain   string        `json:"domain"`
-	Path     string        `json:"path"`
+	Name     string   `json:"name"`
+	SameSite SameSite `json:"same_site"`
+	Insecure bool     `json:"insecure,omitempty"`
+	Domain   string   `json:"domain,omitempty"`
+	Path     string   `json:"path"`
 }
 
 func (o *Cookies) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
@@ -40,18 +104,9 @@ func (o *Cookies) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				}
 				o.Name = d.Val()
 			case "same_site":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				switch d.Val() {
-				case "lax":
-					o.SameSite = http.SameSiteLaxMode
-				case "strict":
-					o.SameSite = http.SameSiteStrictMode
-				case "none":
-					o.SameSite = http.SameSiteNoneMode
-				default:
-					return d.Errf("invalid same_site value: %s", d.Val())
+				err := o.SameSite.UnmarshalCaddyfile(d)
+				if err != nil {
+					return err
 				}
 			case "insecure":
 				o.Insecure = true
@@ -78,10 +133,9 @@ func (o *Cookies) Validate() error {
 		return errors.New("cookie name cannot be empty")
 	}
 
-	switch o.SameSite {
-	case http.SameSiteLaxMode, http.SameSiteStrictMode, http.SameSiteNoneMode:
-	default:
-		return errors.New("same_site must be one of lax, strict, or none")
+	err := o.SameSite.Validate()
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -91,7 +145,7 @@ func (o *Cookies) New(value string) *http.Cookie {
 	return &http.Cookie{
 		Name:     o.Name,
 		Value:    value,
-		SameSite: o.SameSite,
+		SameSite: o.SameSite.SameSite,
 		Secure:   !o.Insecure,
 		Domain:   o.Domain,
 		Path:     o.Path,
