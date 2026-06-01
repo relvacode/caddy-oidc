@@ -404,6 +404,7 @@ func TestSessionCookieAuthenticator_HandleCallback_CopiesClaimsAsRawJSON(t *test
 	}`, string(s.Claims))
 }
 
+//nolint:tparallel // Tests need to run in order
 func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 	t.Parallel()
 
@@ -428,9 +429,12 @@ func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 	err = au.Provision(ctx)
 	require.NoError(t, err)
 
-	var authCookie *http.Cookie
-	var sessionStorePath string
+	var (
+		authCookie       *http.Cookie
+		sessionStorePath string
+	)
 
+	//nolint:paralleltest
 	t.Run("Callback", func(t *testing.T) {
 		var (
 			csrfCookieName    = fmt.Sprintf("%s|%s", au.Name, "test-state")
@@ -449,14 +453,14 @@ func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 		rw := httptest.NewRecorder()
 
 		cfg := new(pkgtest.TestOIDCConfiguration)
-		cfg.ExchangeFunc = func(ctx context.Context, code string, opts ...oauth2.AuthCodeOption) (*oauth2.Token, error) {
+		cfg.ExchangeFunc = func(_ context.Context, code string, _ ...oauth2.AuthCodeOption) (*oauth2.Token, error) {
 			assert.Equal(t, "test-code", code)
 
 			tok := &oauth2.Token{RefreshToken: "test-refresh-token", ExpiresIn: 3600}
 
 			return tok.WithExtra(map[string]any{"id_token": pkgtest.GenerateTestJWTExpiresAt(cfg.Now().Add(time.Hour))}), nil
 		}
-		cfg.UserInfoFunc = func(ctx context.Context, token oauth2.TokenSource) (*oidc.UserInfo, error) {
+		cfg.UserInfoFunc = func(_ context.Context, _ oauth2.TokenSource) (*oidc.UserInfo, error) {
 			return newTestUserInfo(t, `{
 				"sub": "admin",
 				"preferred_username": "admin",
@@ -482,6 +486,7 @@ func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	//nolint:paralleltest
 	t.Run("AuthenticateWithValidToken", func(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		r.AddCookie(authCookie)
@@ -494,13 +499,14 @@ func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 
 	var authCookie2 *http.Cookie
 
+	//nolint:paralleltest
 	t.Run("AuthenticateWithExpiredTokenDoRefresh", func(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		r.AddCookie(authCookie)
 
 		cfg := new(pkgtest.TestOIDCConfiguration)
 		cfg.ClockAdjust = time.Hour * 2
-		cfg.UserInfoFunc = func(ctx context.Context, token oauth2.TokenSource) (*oidc.UserInfo, error) {
+		cfg.UserInfoFunc = func(_ context.Context, _ oauth2.TokenSource) (*oidc.UserInfo, error) {
 			return newTestUserInfo(t, `{
 				"sub": "admin2",
 				"preferred_username": "admin",
@@ -510,8 +516,9 @@ func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 
 		var refreshCalled bool
 
-		cfg.RefreshFunc = func(ctx context.Context, refreshToken string) (*oauth2.Token, error) {
+		cfg.RefreshFunc = func(_ context.Context, refreshToken string) (*oauth2.Token, error) {
 			refreshCalled = true
+
 			assert.Equal(t, "test-refresh-token", refreshToken)
 
 			tok := &oauth2.Token{RefreshToken: "test-refresh-token2", ExpiresIn: 3600}
@@ -537,6 +544,7 @@ func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	//nolint:paralleltest
 	t.Run("AuthenticateAgainWithSameExpiredToken", func(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		r.AddCookie(authCookie)
@@ -549,6 +557,7 @@ func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 		require.Error(t, err)
 	})
 
+	//nolint:paralleltest
 	t.Run("AuthenticateWithExpiredRefreshToken", func(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		r.AddCookie(authCookie2)
@@ -558,7 +567,7 @@ func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 
 		var refreshCalled bool
 
-		cfg.RefreshFunc = func(ctx context.Context, refreshToken string) (*oauth2.Token, error) {
+		cfg.RefreshFunc = func(_ context.Context, _ string) (*oauth2.Token, error) {
 			refreshCalled = true
 
 			return nil, &oauth2.RetrieveError{
@@ -567,7 +576,9 @@ func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 		}
 
 		_, err := au.AuthenticateRequest(cfg, make(http.Header), r)
+
 		assert.True(t, refreshCalled)
+
 		var te *oidc.TokenExpiredError
 		require.ErrorAs(t, err, &te)
 	})

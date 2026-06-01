@@ -39,6 +39,7 @@ linters:
       ignore-names:
         - au
         - tt
+        - id
       ignore-decls:
         - rw http.ResponseWriter
         - r *http.Request
@@ -47,6 +48,7 @@ linters:
         - u *url.URL
         - s *session.Session
         - s session.Session
+        - c *SessionCookie
     tagliatelle:
       case:
         rules:
@@ -85,3 +87,5 @@ linters:
             - github.com/hashicorp/go-retryablehttp
             - github.com/munnerz/goautoneg
             - github.com/stretchr/testify
+            - github.com/caddyserver/certmagic
+            - golang.org/x/crypto/chacha20poly1305

@@ -64,6 +64,7 @@ func (ss SameSite) HTTPSameSite() http.SameSite {
 	}
 }
 
+// RefreshSession is the secure cookie JSON payload that stores refresh session information.
 type RefreshSession struct {
 	ID string `json:"id"`
 	// Secret is the unique refresh session token secret.
@@ -71,6 +72,7 @@ type RefreshSession struct {
 	Secret []byte `json:"s"`
 }
 
+// SessionCookie is the secure cookie JSON payload that stores authenticated session information.
 type SessionCookie struct {
 	session.Session
 
@@ -320,6 +322,8 @@ func (au *SessionCookieAuthenticator) storeRefreshToken(ctx context.Context, ref
 	// Unix timestamp, 32 byte None, Payload.
 	// The timestamp is currently unused but may be used in the future for token expiration.
 	sealed := make([]byte, byteSizeU64+chacha20poly1305.NonceSizeX, byteSizeU64+chacha20poly1305.NonceSizeX+len(refreshToken)+chacha20poly1305.Overhead)
+
+	//nolint:gosec // int64 -> uint64 is perfectly valid
 	binary.LittleEndian.PutUint64(sealed[:byteSizeU64], uint64(time.Now().Unix()))
 	copy(sealed[byteSizeU64:], nonce)
 
@@ -533,8 +537,10 @@ func (au *SessionCookieAuthenticator) AuthenticateRequest(cfg OIDCConfiguration,
 		return nil, caddyhttp.Error(http.StatusBadRequest, err)
 	}
 
-	var c = new(SessionCookie)
-	var s = &c.Session
+	var (
+		c = new(SessionCookie)
+		s = &c.Session
+	)
 
 	err = au.secure.Decode(au.Name, cookiePlain.Value, c)
 	if err != nil {

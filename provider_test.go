@@ -98,7 +98,9 @@ func TestOAuth2ClientTemplate_Exchange_TokenParams(t *testing.T) {
 	assert.ErrorIs(t, err, errTransportSentinel)
 }
 
-type testOAuthClientImpl struct{}
+type testOAuthClientImpl struct {
+	pkgtest.OAuth2Mock
+}
 
 func (testOAuthClientImpl) AuthCodeURL(state string, opts ...oauth2.AuthCodeOption) string {
 	var oConfig = oauth2.Config{
@@ -158,7 +160,7 @@ func GenerateTestProvider() *Provider {
 	provider.Discovery = Defer[*providerDiscoveryConfiguration](func() (*providerDiscoveryConfiguration, error) {
 		return &providerDiscoveryConfiguration{
 			Verifier: pkgtest.NewTestVerifier(provider.Clock),
-			OAuth2:   testOAuthClientImpl{},
+			OAuth2:   &testOAuthClientImpl{},
 		}, nil
 	})
 

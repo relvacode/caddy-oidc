@@ -69,6 +69,9 @@ func NewTestVerifier(clock func() time.Time) *oidc.IDTokenVerifier {
 	})
 }
 
+// OAuth2Mock is a mock implementation for testing OAuth2 interactions
+// where functions can override each exported method.
+// If any function is not overridden, the associated method will return an error.
 type OAuth2Mock struct {
 	AuthCodeURLFunc func(ctx context.Context, state string, opts ...oauth2.AuthCodeOption) (string, error)
 	ExchangeFunc    func(ctx context.Context, code string, opts ...oauth2.AuthCodeOption) (*oauth2.Token, error)
