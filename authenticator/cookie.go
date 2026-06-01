@@ -308,11 +308,13 @@ func (au *SessionCookieAuthenticator) refreshCookieName() string {
 // makeSecureCookie creates a new http.Cookie using the SessionCookieAuthenticator configuration
 // from a payload to be passed to the secure cookie signer.
 // If v is nil, then the cookie is given no value.
-func (au *SessionCookieAuthenticator) makeSecureCookie(v any, name string) (*http.Cookie, error) {
+func (au *SessionCookieAuthenticator) makeSecureCookie(payload any, name string) (*http.Cookie, error) {
 	var value string
-	if v != nil {
+
+	if payload != nil {
 		var err error
-		value, err = au.secure.Encode(name, v)
+
+		value, err = au.secure.Encode(name, payload)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode session cookie: %w", err)
 		}
@@ -534,6 +536,8 @@ func (au *SessionCookieAuthenticator) tryRefreshSession(ctx context.Context, cfg
 	defer func() {
 		if deleteRefreshCookie {
 			refreshCookie, _ = au.makeSecureCookie(nil, au.refreshCookieName())
+
+			//nolint:gosec // User controls whether the CSRF cookie is secure or not
 			refreshCookie.MaxAge = -1
 
 			if refreshCookie != nil {
@@ -681,7 +685,6 @@ func (au *SessionCookieAuthenticator) StartLogin(cfg OIDCConfiguration, rw http.
 		csrfCookiePayload = &CSRFToken{PKCEVerifier: pkceVerifier, RedirectURI: r.RequestURI}
 	)
 
-	//nolint:gosec // User controls whether the CSRF cookie is secure or not
 	csrfCookie, err := au.makeSecureCookie(csrfCookiePayload, au.csrfCookieName(state))
 	if err != nil {
 		return err
@@ -716,7 +719,6 @@ func (au *SessionCookieAuthenticator) handleCallbackParseCSRFCookie(rw http.Resp
 	}
 
 	// Delete CSRF cookie
-	//nolint:gosec // User controls whether the CSRF cookie is secure or not
 	deleteCsrfCookie, err := au.makeSecureCookie(nil, csrfCookieName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create delete CSRF cookie: %w", err)

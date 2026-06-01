@@ -12,6 +12,7 @@ configured individually, perform authentication and authorization at the Caddy l
 - Easier integration with security tools like fail2ban, etc
 - Anonymous access and client ip-based authorization rules
 - Support for RFC9728 (OAuth 2.0 Protected Resource Metadata)
+- Support for refresh token automation without additional infrastructure
 
 # Installation
 
