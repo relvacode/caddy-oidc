@@ -3,6 +3,7 @@ package authenticator
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +39,7 @@ func init() {
 const (
 	defaultCookiePath  = "/"
 	defaultRedirectURL = "/oauth2/callback"
+	byteSizeU64        = 8
 )
 
 // ErrNoIDToken is returned when an OAuth2 code exchange response does not contain an ID token.
@@ -314,8 +316,12 @@ func (au *SessionCookieAuthenticator) storeRefreshToken(ctx context.Context, ref
 		return nil, fmt.Errorf("failed to create AEAD: %w", err)
 	}
 
-	sealed := make([]byte, chacha20poly1305.NonceSizeX, chacha20poly1305.NonceSizeX+len(refreshToken)+chacha20poly1305.Overhead)
-	copy(sealed, nonce)
+	// Format:
+	// Unix timestamp, 32 byte None, Payload.
+	// The timestamp is currently unused but may be used in the future for token expiration.
+	sealed := make([]byte, byteSizeU64+chacha20poly1305.NonceSizeX, byteSizeU64+chacha20poly1305.NonceSizeX+len(refreshToken)+chacha20poly1305.Overhead)
+	binary.LittleEndian.PutUint64(sealed[:byteSizeU64], uint64(time.Now().Unix()))
+	copy(sealed[byteSizeU64:], nonce)
 
 	sealed = aead.Seal(sealed, nonce, []byte(refreshToken), nil)
 
@@ -465,13 +471,13 @@ func (au *SessionCookieAuthenticator) tryRefreshSession(ctx context.Context, cfg
 		_ = au.storage.Delete(ctx, storagePath)
 	}()
 
-	if len(refreshTokenSealed) < (chacha20poly1305.NonceSizeX + chacha20poly1305.Overhead) {
+	if len(refreshTokenSealed) < (byteSizeU64 + chacha20poly1305.NonceSizeX + chacha20poly1305.Overhead) {
 		return nil, false, errors.New("sealed refresh token session is too short")
 	}
 
 	var (
-		nonce  = refreshTokenSealed[:chacha20poly1305.NonceSizeX]
-		sealed = refreshTokenSealed[chacha20poly1305.NonceSizeX:]
+		nonce  = refreshTokenSealed[byteSizeU64 : byteSizeU64+chacha20poly1305.NonceSizeX]
+		sealed = refreshTokenSealed[byteSizeU64+chacha20poly1305.NonceSizeX:]
 	)
 
 	aead, err := chacha20poly1305.NewX(c.Refresh.Secret)

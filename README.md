@@ -256,6 +256,9 @@ to prevent concurrent refresh attempts.
 
 Only the client has the persistent secret needed to decrypt the refresh token in Caddy's persistent storage.
 
+> [!NOTE]
+> There is currently no mechanism to clean up unused refresh tokens stored in Caddy's file system.
+
 #### Header
 
 The `header` authenticator authenticates a JWT token passed via an incoming HTTP request header (without any prefix).
