@@ -18,6 +18,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/relvacode/caddy-oidc/session"
 	"github.com/tidwall/sjson"
+	"golang.org/x/oauth2"
 )
 
 //go:generate go tool go-enum -f=$GOFILE --marshal
@@ -38,6 +39,11 @@ type OIDCConfiguration interface {
 	GetVerifier(ctx context.Context) (*oidc.IDTokenVerifier, error)
 	// GetUsernameClaim returns the claim name used to extract the username from the ID token.
 	GetUsernameClaim() string
+
+	AuthCodeURL(ctx context.Context, state string, opts ...oauth2.AuthCodeOption) (string, error)
+	Exchange(ctx context.Context, code string, opts ...oauth2.AuthCodeOption) (*oauth2.Token, error)
+	Refresh(ctx context.Context, refreshToken string) (*oauth2.Token, error)
+	UserInfo(ctx context.Context, tokenSource oauth2.TokenSource) (*oidc.UserInfo, error)
 }
 
 // A RequestAuthenticator extracts authentication information from an incoming request.
@@ -47,7 +53,8 @@ type RequestAuthenticator interface {
 
 	// AuthenticateRequest extracts authentication session information from the incoming request.
 	// If the request does not contain valid authentication, then it must return ErrNoAuthentication.
-	AuthenticateRequest(cfg OIDCConfiguration, r *http.Request) (*session.Session, error)
+	// AuthenticateRequest may read and write to the provided HTTP request header.
+	AuthenticateRequest(cfg OIDCConfiguration, hdr http.Header, r *http.Request) (*session.Session, error)
 
 	// StripRequest removes any authentication information from the request.
 	StripRequest(r *http.Request)
@@ -164,12 +171,12 @@ func (set *Set) Validate() error {
 // AuthenticateRequest attempts to authenticate the request using the configured authenticators.
 // It returns the first successful authentication method and session.
 //
-// Any ErrNoAuthentication or oidc.TokenExpiredError errors are ignored, and the next authenticator in sequence is tried.
+// Any ErrNoAuthentication or oidc.TokenExpiredError errors are ignored, and the next authenticator in the sequence is tried.
 // If no authenticators succeed and Required is set, then ErrNoAuthentication is returned.
 // Otherwise, an anonymous session is returned.
-func (set *Set) AuthenticateRequest(cfg OIDCConfiguration, r *http.Request) (AuthMethod, *session.Session, error) {
+func (set *Set) AuthenticateRequest(cfg OIDCConfiguration, hdr http.Header, r *http.Request) (AuthMethod, *session.Session, error) {
 	for _, authenticator := range set.Authenticators {
-		s, err := authenticator.AuthenticateRequest(cfg, r)
+		s, err := authenticator.AuthenticateRequest(cfg, hdr, r)
 		if err == nil {
 			return authenticator.Method(), s, nil
 		}

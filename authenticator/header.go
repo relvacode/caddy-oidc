@@ -53,7 +53,7 @@ func (au *HeaderAuthenticator) Validate() error {
 
 func (*HeaderAuthenticator) Method() AuthMethod { return AuthMethodHeader }
 
-func (au *HeaderAuthenticator) AuthenticateRequest(cfg OIDCConfiguration, r *http.Request) (*session.Session, error) {
+func (au *HeaderAuthenticator) AuthenticateRequest(cfg OIDCConfiguration, _ http.Header, r *http.Request) (*session.Session, error) {
 	headerValue := r.Header.Get(au.Header)
 	if headerValue == "" {
 		return nil, caddyhttp.Error(http.StatusUnauthorized, ErrNoAuthentication)

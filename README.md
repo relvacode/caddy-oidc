@@ -194,7 +194,8 @@ filesystem on every token exchange, so token rotation is handled automatically.
 
 > [!NOTE]
 > While the underlying mechanism (RFC 7523 JWT bearer client assertions) is a standard, this pattern has been tested
-> with Microsoft Entra ID federated credentials. The same `token_params` approach can be adapted for other providers that
+> with Microsoft Entra ID federated credentials. The same `token_params` approach can be adapted for other providers
+> that
 > accept custom parameters during the token exchange.
 
 #### Bearer
@@ -220,6 +221,7 @@ The `cookie` authenticator is used to authenticate requests using a self-signed 
 | `same_site`    | (optional) The samesite mode of the cookie. One of `lax`, `strict` or `none`                                                                                |                    |
 | `claim`        | (optional) Claims to copy into the session cookie.                                                                                                          |                    |
 | `redirect_url` | (optional) The URL to redirect to after authentication. If the URL is relative, the fully qualified URL is constructed using the request host and protocol. | `/oauth2/callback` |
+| `refresh`      | (optional) Enable refresh token automation.                                                                                                                 |                    |
 
 To minimize the size of the cookie, no claims are copied into the session cookie by default.
 Claims can be copied by specifying the `claims` option if needed for access policy rules or placeholder variables (e.g.,
@@ -237,6 +239,22 @@ Automatic redirection to the OIDC provider for login happens when all the follow
 - The request is made by a browser, determined by:
     - `Sec-Fetch-Dest` is `document` or `iframe`
     - `Accept` header contains `text/html`
+
+The `refresh` option enables automatic token refreshing for cookie sessions by storing the user's refresh
+token in Caddy's [file system](https://caddyserver.com/docs/caddyfile/directives/fs).
+
+When enabled and the OIDC server provides a refresh token when handling the OAuth callback,
+the cookie authenticator will derive a random 32-byte key stored in the session cookie
+and then encrypt the refresh token using XCHACHA20-POLY1305 with the key.
+The encrypted refresh token is then stored in Caddy's configured file system under a unique session ID.
+
+During request authentication, if the session cookie has expired and contains a refreshable token,
+then the cookie authenticator will attempt to refresh the token using the refresh token
+and then store the new access token in the session cookie.
+During refresh, the authenticator will hold an exclusive lock on the session cookie
+to prevent concurrent refresh attempts.
+
+Only the client has the persistent secret needed to decrypt the refresh token in Caddy's persistent storage.
 
 #### Header
 

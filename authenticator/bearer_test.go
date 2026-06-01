@@ -24,7 +24,7 @@ func TestBearerAuthenticator_AuthenticateRequest(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("Authorization", "Bearer "+pkgtest.GenerateTestJWTExpiresAt(cfg.Now().Add(time.Hour)))
 
-	s, err := au.AuthenticateRequest(&cfg, r)
+	s, err := au.AuthenticateRequest(&cfg, make(http.Header), r)
 	require.NoError(t, err)
 	assert.Equal(t, "test", s.UID)
 }
@@ -39,7 +39,7 @@ func TestBearerAuthentication_AuthenticateRequest_WithoutBearerToken(t *testing.
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 
-	_, err := au.AuthenticateRequest(&cfg, r)
+	_, err := au.AuthenticateRequest(&cfg, make(http.Header), r)
 	assert.ErrorIs(t, err, ErrNoAuthentication)
 }
 
@@ -54,7 +54,7 @@ func TestBearerAuthentication_AuthenticateRequest_InvalidBearerToken(t *testing.
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("Authorization", "Bearer xxxxx")
 
-	_, err := au.AuthenticateRequest(&cfg, r)
+	_, err := au.AuthenticateRequest(&cfg, make(http.Header), r)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "compact JWS format must have three parts")
 }
@@ -72,7 +72,7 @@ func TestBearerAuthentication_AuthenticateRequest_EmailForUsernameClaim(t *testi
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("Authorization", "Bearer "+pkgtest.GenerateTestJWTExpiresAt(cfg.Now().Add(time.Hour)))
 
-	s, err := au.AuthenticateRequest(&cfg, r)
+	s, err := au.AuthenticateRequest(&cfg, make(http.Header), r)
 	require.NoError(t, err)
 	assert.Equal(t, "x@example.org", s.UID)
 }
@@ -90,7 +90,7 @@ func TestBearerAuthentication_AuthenticateRequest_MissingUsernameClaim(t *testin
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("Authorization", "Bearer "+pkgtest.GenerateTestJWTExpiresAt(cfg.Now().Add(time.Hour)))
 
-	_, err := au.AuthenticateRequest(&cfg, r)
+	_, err := au.AuthenticateRequest(&cfg, make(http.Header), r)
 
 	var mce session.MissingRequiredClaimError
 	if assert.ErrorAs(t, err, &mce) {
@@ -109,7 +109,7 @@ func TestBearerAuthentication_AuthenticateRequest_BearerTokenExpired(t *testing.
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("Authorization", "Bearer "+pkgtest.GenerateTestJWTExpiresAt(cfg.Now().Add(-time.Hour)))
 
-	_, err := au.AuthenticateRequest(&cfg, r)
+	_, err := au.AuthenticateRequest(&cfg, make(http.Header), r)
 	require.Error(t, err)
 
 	var ee *oidc.TokenExpiredError

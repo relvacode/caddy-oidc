@@ -160,7 +160,7 @@ func (mw *OIDCMiddleware) interceptRequest(rw http.ResponseWriter, r *http.Reque
 		return true, mw.Provider.ServeHTTPOAuthProtectedResource(rw, r)
 	}
 
-	authMethod, s, err := mw.Provider.Authenticators.AuthenticateRequest(mw.Provider, r)
+	authMethod, s, err := mw.Provider.Authenticators.AuthenticateRequest(mw.Provider, rw.Header(), r)
 	if err != nil {
 		return false, err
 	}

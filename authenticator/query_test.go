@@ -36,7 +36,7 @@ func TestQueryAuthenticator_AuthenticateRequest(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/?api-key="+pkgtest.GenerateTestJWTExpiresAt(cfg.Now().Add(time.Hour)), nil)
 
-	_, err := au.AuthenticateRequest(&cfg, r)
+	_, err := au.AuthenticateRequest(&cfg, make(http.Header), r)
 	require.NoError(t, err)
 }
 
@@ -52,7 +52,7 @@ func TestQueryAuthenticator_AuthenticateRequest_MissingQuery(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 
-	_, err := au.AuthenticateRequest(&cfg, r)
+	_, err := au.AuthenticateRequest(&cfg, make(http.Header), r)
 	assert.ErrorIs(t, err, ErrNoAuthentication)
 }
 

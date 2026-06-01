@@ -53,7 +53,7 @@ func (au *QueryAuthenticator) Validate() error {
 
 func (*QueryAuthenticator) Method() AuthMethod { return AuthMethodQuery }
 
-func (au *QueryAuthenticator) AuthenticateRequest(cfg OIDCConfiguration, r *http.Request) (*session.Session, error) {
+func (au *QueryAuthenticator) AuthenticateRequest(cfg OIDCConfiguration, _ http.Header, r *http.Request) (*session.Session, error) {
 	queryValue := r.URL.Query().Get(au.Query)
 	if queryValue == "" {
 		return nil, caddyhttp.Error(http.StatusUnauthorized, ErrNoAuthentication)

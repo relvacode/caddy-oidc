@@ -37,7 +37,7 @@ func TestHeaderAuthenticator_AuthenticateRequest(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("X-Api-Key", pkgtest.GenerateTestJWTExpiresAt(cfg.Now().Add(time.Hour)))
 
-	_, err := au.AuthenticateRequest(&cfg, r)
+	_, err := au.AuthenticateRequest(&cfg, make(http.Header), r)
 	require.NoError(t, err)
 }
 
@@ -53,7 +53,7 @@ func TestHeaderAuthenticator_AuthenticateRequest_MissingHeader(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 
-	_, err := au.AuthenticateRequest(&cfg, r)
+	_, err := au.AuthenticateRequest(&cfg, make(http.Header), r)
 	assert.ErrorIs(t, err, ErrNoAuthentication)
 }
 
