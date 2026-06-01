@@ -379,6 +379,7 @@ func (au *SessionCookieAuthenticator) prepareSessionFromTokenExchange(cfg OIDCCo
 }
 
 func (au *SessionCookieAuthenticator) makeCookie(value string) *http.Cookie {
+	//nolint:gosec // User controls whether the CSRF cookie is secure or not
 	return &http.Cookie{
 		Name:     au.Name,
 		Value:    value,
@@ -610,6 +611,7 @@ func (au *SessionCookieAuthenticator) StartLogin(cfg OIDCConfiguration, rw http.
 		return err
 	}
 
+	//nolint:gosec // User controls whether the CSRF cookie is secure or not
 	csrfCookie := au.makeCookie(csrfCookieValue)
 	csrfCookie.Name = csrfCookieName
 	csrfCookie.MaxAge = 900 // 15-minute short expiry time for the CSRF cookie
@@ -624,6 +626,7 @@ func (au *SessionCookieAuthenticator) StartLogin(cfg OIDCConfiguration, rw http.
 		return err
 	}
 
+	//nolint:gosec // Implicit trust in the auth code URL provided by the OIDC provider
 	http.Redirect(rw, r, authCodeURL, http.StatusFound)
 
 	return nil
@@ -640,6 +643,7 @@ func (au *SessionCookieAuthenticator) handleCallbackParseCSRFCookie(rw http.Resp
 	}
 
 	// Delete CSRF cookie
+	//nolint:gosec // User controls whether the CSRF cookie is secure or not
 	deleteCsrfCookie := au.makeCookie("")
 	deleteCsrfCookie.Name = csrfCookieName
 	deleteCsrfCookie.MaxAge = -1

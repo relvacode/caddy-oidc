@@ -10,6 +10,7 @@ linters:
     - goconst
     - exhaustruct
     - ireturn
+    - gomodguard
   exclusions:
     rules:
       - path: '(.+)_test\.go'
@@ -19,6 +20,8 @@ linters:
           - gochecknoglobals
           - lll
           - varnamelen
+          - gosec
+          - noctx
       - linters:
           - funlen
         text: "Function 'UnmarshalCaddyfile' has too many statements"

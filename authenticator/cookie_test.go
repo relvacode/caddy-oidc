@@ -323,7 +323,6 @@ func newTestUserInfo(t *testing.T, claims string) *oidc.UserInfo {
 	claimsField := reflect.ValueOf(userInfo).Elem().FieldByName("claims")
 	require.True(t, claimsField.IsValid())
 
-	//nolint:gosec // This is only used for testing
 	reflect.NewAt(claimsField.Type(), unsafe.Pointer(claimsField.UnsafeAddr())).
 		Elem().
 		SetBytes([]byte(claims))
