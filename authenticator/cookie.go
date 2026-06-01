@@ -39,7 +39,11 @@ func init() {
 const (
 	defaultCookiePath  = "/"
 	defaultRedirectURL = "/oauth2/callback"
-	byteSizeU64        = 8
+
+	byteSizeU64 = 8
+
+	refreshCookieMaxAge = 30 * 24 * time.Hour
+	csrfCookieMaxAge    = 15 * time.Minute
 )
 
 // ErrNoIDToken is returned when an OAuth2 code exchange response does not contain an ID token.
@@ -72,11 +76,10 @@ type RefreshSession struct {
 	Secret []byte `json:"s"`
 }
 
-// SessionCookie is the secure cookie JSON payload that stores authenticated session information.
-type SessionCookie struct {
-	session.Session
-
-	Refresh *RefreshSession `json:"r,omitempty"`
+// CSRFToken is the CSRF cookie payload when perform an OAuth2 Authorization Flow.
+type CSRFToken struct {
+	PKCEVerifier string `json:"v"`
+	RedirectURI  string `json:"r"`
 }
 
 func introspectToken(ctx context.Context, tok *oauth2.Token, cfg OIDCConfiguration) (*oidc.UserInfo, time.Time, string, error) {
@@ -289,6 +292,44 @@ func (au *SessionCookieAuthenticator) Validate() error {
 
 func (*SessionCookieAuthenticator) Method() AuthMethod { return AuthMethodCookie }
 
+func (au *SessionCookieAuthenticator) sessionCookieName() string {
+	return au.Name
+}
+
+func (au *SessionCookieAuthenticator) csrfCookieName(state string) string {
+	return au.Name + "|" + state
+}
+
+// refreshCookieName returns the name of the refresh cookie.
+func (au *SessionCookieAuthenticator) refreshCookieName() string {
+	return au.Name + "|refresh"
+}
+
+// makeSecureCookie creates a new http.Cookie using the SessionCookieAuthenticator configuration
+// from a payload to be passed to the secure cookie signer.
+// If v is nil, then the cookie is given no value.
+func (au *SessionCookieAuthenticator) makeSecureCookie(v any, name string) (*http.Cookie, error) {
+	var value string
+	if v != nil {
+		var err error
+		value, err = au.secure.Encode(name, v)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode session cookie: %w", err)
+		}
+	}
+
+	//nolint:gosec // User controls whether the CSRF cookie is secure or not
+	return &http.Cookie{
+		Name:     name,
+		Value:    value,
+		SameSite: au.SameSite.HTTPSameSite(),
+		Path:     au.Path,
+		Domain:   au.Domain,
+		HttpOnly: true,
+		Secure:   !au.Insecure,
+	}, nil
+}
+
 func (*SessionCookieAuthenticator) storageKeyForID(id string) string {
 	return path.Join("oidc", "sessions", id)
 }
@@ -302,7 +343,7 @@ func (*SessionCookieAuthenticator) storageKeyForID(id string) string {
 // The refresh token is encrypted using this key using random nonce
 // and stored in the storage implementation, keyed by the unique identifier.
 // Only the client has the secret needed to decrypt their refresh token.
-func (au *SessionCookieAuthenticator) storeRefreshToken(ctx context.Context, refreshToken string) (*RefreshSession, error) {
+func (au *SessionCookieAuthenticator) storeRefreshToken(ctx context.Context, hdr http.Header, refreshToken string) error {
 	var (
 		id     = uuid.New().String()
 		secret = make([]byte, chacha20poly1305.KeySize)
@@ -315,7 +356,7 @@ func (au *SessionCookieAuthenticator) storeRefreshToken(ctx context.Context, ref
 
 	aead, err := chacha20poly1305.NewX(secret)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create AEAD: %w", err)
+		return fmt.Errorf("failed to create AEAD: %w", err)
 	}
 
 	// Format:
@@ -333,13 +374,19 @@ func (au *SessionCookieAuthenticator) storeRefreshToken(ctx context.Context, ref
 
 	err = au.storage.Store(ctx, au.storageKeyForID(id), sealed)
 	if err != nil {
-		return nil, fmt.Errorf("failed to store refresh token session: %w", err)
+		return fmt.Errorf("failed to store refresh token session: %w", err)
 	}
 
-	return &RefreshSession{
-		ID:     id,
-		Secret: secret,
-	}, nil
+	refreshSessionCookie, err := au.makeSecureCookie(&RefreshSession{ID: id, Secret: secret}, au.refreshCookieName())
+	if err != nil {
+		return err
+	}
+
+	refreshSessionCookie.MaxAge = int(refreshCookieMaxAge.Seconds())
+
+	hdr.Add("Set-Cookie", refreshSessionCookie.String())
+
+	return nil
 }
 
 // prepareSessionFromTokenExchange prepares a session from the token exchange response by extracting the userinfo claims
@@ -378,23 +425,11 @@ func (au *SessionCookieAuthenticator) prepareSessionFromTokenExchange(cfg OIDCCo
 	return &s, nil
 }
 
-func (au *SessionCookieAuthenticator) makeCookie(value string) *http.Cookie {
-	//nolint:gosec // User controls whether the CSRF cookie is secure or not
-	return &http.Cookie{
-		Name:     au.Name,
-		Value:    value,
-		SameSite: au.SameSite.HTTPSameSite(),
-		Path:     au.Path,
-		Domain:   au.Domain,
-		HttpOnly: true,
-		Secure:   !au.Insecure,
-	}
-}
-
 // convertOAuthTokenIntoStoredSession performs all the necessary actions to convert an OAuth2 token response into a request session.
 // The OAuth2 token is introspected and used to populate the session claims and metadata.
-// If the token contains a refresh token, then the refresh token is stored in the storage system for future use.
-// The session is then encoded and set as a cookie into the response http.Header.
+//
+// If the token contains a refresh token, then the refresh token is stored in the storage system for future use
+// and an additional cookie is stored in the provided response headers.
 func (au *SessionCookieAuthenticator) convertOAuthTokenIntoStoredSession(ctx context.Context, cfg OIDCConfiguration, hdr http.Header, tok *oauth2.Token) (*session.Session, error) { //nolint:lll
 	userInfo, idTokenExpires, refreshToken, err := introspectToken(ctx, tok, cfg)
 	if err != nil {
@@ -406,69 +441,38 @@ func (au *SessionCookieAuthenticator) convertOAuthTokenIntoStoredSession(ctx con
 		return nil, err
 	}
 
-	c := &SessionCookie{
-		Session: *s,
-	}
-
 	// If the code exchange provided a refresh token to use and this authenticator is configured to use session storage,
 	// then we will generate and store a new refresh session in the configured storage.
 	if refreshToken != "" && au.storage != nil {
-		c.Refresh, err = au.storeRefreshToken(ctx, refreshToken)
+		err = au.storeRefreshToken(ctx, hdr, refreshToken)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate and store a refresh token session: %w", err)
 		}
-
-		defer zero(c.Refresh.Secret)
 	}
 
-	cookieValue, err := au.secure.Encode(au.Name, &c)
+	sessionCookie, err := au.makeSecureCookie(s, au.sessionCookieName())
 	if err != nil {
-		return nil, fmt.Errorf("failed to encode session cookie: %w", err)
+		return nil, err
 	}
 
-	hdr.Add("Set-Cookie", au.makeCookie(cookieValue).String())
+	sessionCookie.Expires = idTokenExpires
 
-	return &c.Session, nil
+	hdr.Add("Set-Cookie", sessionCookie.String())
+
+	return s, nil
 }
 
-// tryRefreshSession attempts to automatically refresh session credentials using the refresh session
-// stored in the provided session cookie and returns the new session.
-//
-// If the session cookie has no refresh session credentials, or this authenticator is not configured with
-// a storage implementation, then a session can never be refreshed and false is returned.
-//
-// If the session was successfully refreshed, then the session cookie is updated in-place with
-// a new refresh session and true is returned.
-// If the refresh fails due to an invalid_grant it assumes that the refresh token is no longer valid.
-//
-//nolint:funlen
-func (au *SessionCookieAuthenticator) tryRefreshSession(ctx context.Context, cfg OIDCConfiguration, hdr http.Header, c *SessionCookie) (*session.Session, bool, error) { //nolint:lll
-	storagePath := au.storageKeyForID(c.Refresh.ID)
-
-	log := au.log.With(zap.String("session_id", c.Refresh.ID))
-	log.Debug("Trying to refresh session using stored refresh token")
-
-	// Lock the storage for this session.
-	// This prevents concurrent in-flight requests from attempting to refresh the same session at the same time.
-	err := au.storage.Lock(ctx, storagePath)
-	if err != nil {
-		return nil, false, fmt.Errorf("failed to lock refresh token session: %w", err)
-	}
-
-	defer func() {
-		_ = au.storage.Unlock(ctx, storagePath)
-	}()
+// decryptRefreshTokenFromStorage decrypts the stored refresh token in storage for the provided RefreshSession.
+// It returns the plain text refresh token or an error if decryption fails.
+// If present, the session is always deleted from storage.
+// It does not hold a lock on the storage implementation.
+// If there is no refresh token stored in the storage system, then it returns fs.ErrNotExist.
+func (au *SessionCookieAuthenticator) decryptRefreshTokenFromStorage(ctx context.Context, refreshSession *RefreshSession) (string, error) {
+	var storagePath = au.storageKeyForID(refreshSession.ID)
 
 	refreshTokenSealed, err := au.storage.Load(ctx, storagePath)
 	if err != nil {
-		// Allow for no refresh session to be stored
-		if errors.Is(err, fs.ErrNotExist) {
-			log.Debug("No refresh token session found in storage, skipping refresh")
-
-			return nil, false, nil
-		}
-
-		return nil, false, fmt.Errorf("failed to load refresh token session: %w", err)
+		return "", fmt.Errorf("failed to load refresh token session: %w", err)
 	}
 
 	// Always drop the session from Caddy storage
@@ -477,7 +481,7 @@ func (au *SessionCookieAuthenticator) tryRefreshSession(ctx context.Context, cfg
 	}()
 
 	if len(refreshTokenSealed) < (byteSizeU64 + chacha20poly1305.NonceSizeX + chacha20poly1305.Overhead) {
-		return nil, false, errors.New("sealed refresh token session is too short")
+		return "", errors.New("sealed refresh token session is too short")
 	}
 
 	var (
@@ -485,20 +489,101 @@ func (au *SessionCookieAuthenticator) tryRefreshSession(ctx context.Context, cfg
 		sealed = refreshTokenSealed[byteSizeU64+chacha20poly1305.NonceSizeX:]
 	)
 
-	aead, err := chacha20poly1305.NewX(c.Refresh.Secret)
+	aead, err := chacha20poly1305.NewX(refreshSession.Secret)
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to create AEAD: %w", err)
+		return "", fmt.Errorf("failed to create AEAD: %w", err)
 	}
 
 	plaintext, err := aead.Open(nil, nonce, sealed, nil)
 	if err != nil {
+		return "", fmt.Errorf("failed to decrypt refresh token session: %w", err)
+	}
+
+	return string(plaintext), nil
+}
+
+// tryRefreshSession attempts to automatically refresh session credentials using the refresh session
+// stored in the request cookies.
+//
+// If the request does not contain a refresh session cookie, or this authenticator is not configured with
+// a storage implementation, then a session can never be refreshed and false is returned.
+//
+// If the session was successfully refreshed, then the session cookie is updated in-place with
+// the new session information retrieved from the token exchange as well as storing a new refresh session
+// if the exchange provided a new one.
+//
+// If the refresh fails due to `invalid_grant`, it assumes that the refresh token is no longer valid.
+//
+//nolint:funlen
+func (au *SessionCookieAuthenticator) tryRefreshSession(ctx context.Context, cfg OIDCConfiguration, hdr http.Header, r *http.Request) (*session.Session, bool, error) { //nolint:lll
+	if au.storage == nil {
+		return nil, false, nil
+	}
+
+	refreshCookie, err := r.Cookie(au.refreshCookieName())
+	if err != nil {
+		if errors.Is(err, http.ErrNoCookie) {
+			return nil, false, nil
+		}
+
+		return nil, false, fmt.Errorf("failed to read refresh cookie: %w", err)
+	}
+
+	// Unless successful, delete the refresh cookie from the client
+	var deleteRefreshCookie = true
+	defer func() {
+		if deleteRefreshCookie {
+			refreshCookie, _ = au.makeSecureCookie(nil, au.refreshCookieName())
+			refreshCookie.MaxAge = -1
+
+			if refreshCookie != nil {
+				hdr.Add("Set-Cookie", refreshCookie.String())
+			}
+		}
+	}()
+
+	var refreshSession = new(RefreshSession)
+
+	defer func() {
+		zero(refreshSession.Secret)
+	}()
+
+	err = au.secure.Decode(au.refreshCookieName(), refreshCookie.Value, refreshSession)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to decode refresh cookie: %w", err)
+	}
+
+	storagePath := au.storageKeyForID(refreshSession.ID)
+
+	log := au.log.With(zap.String("session_id", refreshSession.ID))
+	log.Debug("Trying to refresh session using stored refresh token")
+
+	// Lock the storage for this session.
+	// This prevents concurrent in-flight requests from attempting to refresh the same session at the same time.
+	err = au.storage.Lock(ctx, storagePath)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to lock refresh token session: %w", err)
+	}
+
+	defer func() {
+		_ = au.storage.Unlock(ctx, storagePath)
+	}()
+
+	refreshToken, err := au.decryptRefreshTokenFromStorage(ctx, refreshSession)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			log.Debug("Refresh token session is no longer valid, dropping session")
+
+			return nil, false, nil
+		}
+
 		return nil, false, fmt.Errorf("failed to decrypt refresh token session: %w", err)
 	}
 
 	// Exchange code for ID token
 	log.Debug("Found a valid refresh token, trying to refresh it with the provider")
 
-	tok, err := cfg.Refresh(ctx, string(plaintext))
+	tok, err := cfg.Refresh(ctx, refreshToken)
 	if err != nil {
 		log.Debug("Refresh token is no longer valid, dropping session")
 
@@ -520,6 +605,9 @@ func (au *SessionCookieAuthenticator) tryRefreshSession(ctx context.Context, cfg
 
 	log.Debug("Successfully refreshed token, updating session cookie with new token and refresh token")
 
+	// At this point we have a new refresh cookie to store, so we should no longer delete the refresh cookie from the client
+	deleteRefreshCookie = false
+
 	s, err := au.convertOAuthTokenIntoStoredSession(ctx, cfg, hdr, tok)
 	if err != nil {
 		return nil, false, err
@@ -538,35 +626,29 @@ func (au *SessionCookieAuthenticator) AuthenticateRequest(cfg OIDCConfiguration,
 		return nil, caddyhttp.Error(http.StatusBadRequest, err)
 	}
 
-	var (
-		c = new(SessionCookie)
-		s = &c.Session
-	)
+	var s = new(session.Session)
 
-	err = au.secure.Decode(au.Name, cookiePlain.Value, c)
+	err = au.secure.Decode(au.Name, cookiePlain.Value, s)
 	if err != nil {
 		return nil, caddyhttp.Error(http.StatusBadRequest, err)
 	}
 
-	defer func() {
-		if c.Refresh != nil {
-			zero(c.Refresh.Secret)
-		}
-	}()
-
-	err = c.ValidateClock(cfg.Now())
+	// It's unlikely that the browser would send a cookie set to expire at the same time the session does.
+	// But for completeness of security, we will check it here too.
+	err = s.ValidateClock(cfg.Now())
 	if err == nil {
-		return &c.Session, nil
+		// Session is still valid, so it can be returned immediately
+		return s, nil
 	}
 
 	// If the session is expired, then attempt to refresh the token
-	if _, ok := errors.AsType[*oidc.TokenExpiredError](err); ok && c.Refresh != nil && au.storage != nil {
+	if _, ok := errors.AsType[*oidc.TokenExpiredError](err); ok {
 		var (
 			refreshErr error
 			refreshOk  bool
 		)
 
-		s, refreshOk, refreshErr = au.tryRefreshSession(r.Context(), cfg, hdr, c)
+		s, refreshOk, refreshErr = au.tryRefreshSession(r.Context(), cfg, hdr, r)
 		if refreshErr != nil {
 			return nil, fmt.Errorf("failed to refresh session: %w", refreshErr)
 		}
@@ -578,12 +660,6 @@ func (au *SessionCookieAuthenticator) AuthenticateRequest(cfg OIDCConfiguration,
 	}
 
 	return s, err
-}
-
-// CSRFToken is the CSRF cookie payload when perform an OAuth2 Authorization Flow.
-type CSRFToken struct {
-	PKCEVerifier string `json:"v"`
-	RedirectURI  string `json:"r"`
 }
 
 // GetAbsRedirectURI returns the absolute redirect URI, resolving it relative to the request URL if necessary.
@@ -602,19 +678,16 @@ func (au *SessionCookieAuthenticator) StartLogin(cfg OIDCConfiguration, rw http.
 	var (
 		state             = uuid.New().String()
 		pkceVerifier      = oauth2.GenerateVerifier()
-		csrfCookieName    = fmt.Sprintf("%s|%s", au.Name, state)
 		csrfCookiePayload = &CSRFToken{PKCEVerifier: pkceVerifier, RedirectURI: r.RequestURI}
 	)
 
-	csrfCookieValue, err := au.secure.Encode(csrfCookieName, csrfCookiePayload)
+	//nolint:gosec // User controls whether the CSRF cookie is secure or not
+	csrfCookie, err := au.makeSecureCookie(csrfCookiePayload, au.csrfCookieName(state))
 	if err != nil {
 		return err
 	}
 
-	//nolint:gosec // User controls whether the CSRF cookie is secure or not
-	csrfCookie := au.makeCookie(csrfCookieValue)
-	csrfCookie.Name = csrfCookieName
-	csrfCookie.MaxAge = 900 // 15-minute short expiry time for the CSRF cookie
+	csrfCookie.MaxAge = int(csrfCookieMaxAge.Seconds())
 
 	http.SetCookie(rw, csrfCookie)
 
@@ -635,7 +708,7 @@ func (au *SessionCookieAuthenticator) StartLogin(cfg OIDCConfiguration, rw http.
 // handleCallbackParseCSRFCookie parses the CSRF cookie from the request and returns the CSRF token payload.
 // If any CSRF cookie is found, then a Set-Cookie is sent to remove the cookie from the client.
 func (au *SessionCookieAuthenticator) handleCallbackParseCSRFCookie(rw http.ResponseWriter, r *http.Request) (*CSRFToken, error) {
-	var csrfCookieName = fmt.Sprintf("%s|%s", au.Name, r.FormValue("state"))
+	var csrfCookieName = au.csrfCookieName(r.FormValue("state"))
 
 	csrfCookie, err := r.Cookie(csrfCookieName)
 	if err != nil {
@@ -644,8 +717,11 @@ func (au *SessionCookieAuthenticator) handleCallbackParseCSRFCookie(rw http.Resp
 
 	// Delete CSRF cookie
 	//nolint:gosec // User controls whether the CSRF cookie is secure or not
-	deleteCsrfCookie := au.makeCookie("")
-	deleteCsrfCookie.Name = csrfCookieName
+	deleteCsrfCookie, err := au.makeSecureCookie(nil, csrfCookieName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create delete CSRF cookie: %w", err)
+	}
+
 	deleteCsrfCookie.MaxAge = -1
 
 	http.SetCookie(rw, deleteCsrfCookie)

@@ -3,7 +3,6 @@ package authenticator
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -152,12 +151,12 @@ func TestSessionCookieAuthenticator_AuthenticateRequest_WithCookie(t *testing.T)
 	require.NoError(t, err)
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
-
 	s := &session.Session{UID: "test"}
-	cookieValue, err := au.secure.Encode(au.Name, s)
+
+	cookieValue, err := au.makeSecureCookie(s, au.sessionCookieName())
 	require.NoError(t, err)
 
-	r.AddCookie(au.makeCookie(cookieValue))
+	r.AddCookie(cookieValue)
 
 	s, err = au.AuthenticateRequest(&cfg, make(http.Header), r)
 	if assert.NoError(t, err) {
@@ -187,10 +186,13 @@ func TestSessionCookieAuthenticator_AuthenticateRequest_WithCookieSignedByOther(
 	s := &session.Session{UID: "test"}
 	cookieSigner := securecookie.New([]byte("EPb6FR6Uehz2uWdfhtb7l6c4tXzgMJT8"), []byte("EPb6FR6Uehz2uWdfhtb7l6c4tXzgMJT8"))
 
-	cookie, err := cookieSigner.Encode(au.Name, s)
+	cookieValue, err := cookieSigner.Encode(au.Name, s)
 	require.NoError(t, err)
 
-	r.AddCookie(au.makeCookie(cookie))
+	r.AddCookie(&http.Cookie{
+		Name:  au.sessionCookieName(),
+		Value: cookieValue,
+	})
 
 	_, err = au.AuthenticateRequest(&cfg, make(http.Header), r)
 	require.Error(t, err)
@@ -219,12 +221,12 @@ func TestSessionCookieAuthenticator_AuthenticateRequest_SessionExpired(t *testin
 	require.NoError(t, err)
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
-
 	s := &session.Session{UID: "test", ExpiresAt: cfg.Now().Add(-time.Hour).Unix()}
-	cookieValue, err := au.secure.Encode(au.Name, s)
+
+	cookieValue, err := au.makeSecureCookie(s, au.sessionCookieName())
 	require.NoError(t, err)
 
-	r.AddCookie(au.makeCookie(cookieValue))
+	r.AddCookie(cookieValue)
 
 	hdr := make(http.Header)
 	_, err = au.AuthenticateRequest(&cfg, hdr, r)
@@ -253,10 +255,10 @@ func TestSessionCookieAuthenticator_Provision_64ByteSecret(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 
 	s := &session.Session{UID: "test"}
-	cookieValue, err := au.secure.Encode(au.Name, s)
+	cookieValue, err := au.makeSecureCookie(s, au.sessionCookieName())
 	require.NoError(t, err)
 
-	r.AddCookie(au.makeCookie(cookieValue))
+	r.AddCookie(cookieValue)
 
 	newSession, err := au.AuthenticateRequest(&pkgtest.TestOIDCConfiguration{}, make(http.Header), r)
 	require.NoError(t, err)
@@ -347,15 +349,15 @@ func TestSessionCookieAuthenticator_HandleCallback_CopiesClaimsAsRawJSON(t *test
 
 	const state = "test-state"
 
-	csrfCookieValue, err := au.secure.Encode(au.Name+"|"+state, &CSRFToken{
+	r := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state="+state+"&code=test-code", nil)
+
+	csrfCookie, err := au.makeSecureCookie(&CSRFToken{
 		PKCEVerifier: "test-pkce-verifier",
 		RedirectURI:  "/original",
-	})
+	}, au.csrfCookieName(state))
+
 	require.NoError(t, err)
 
-	r := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state="+state+"&code=test-code", nil)
-	csrfCookie := au.makeCookie(csrfCookieValue)
-	csrfCookie.Name = au.Name + "|" + state
 	r.AddCookie(csrfCookie)
 
 	cfg := &testHandleCallbackConfiguration{
@@ -429,22 +431,14 @@ func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 	require.NoError(t, err)
 
 	var (
-		authCookie       *http.Cookie
+		authCookies      []*http.Cookie
 		sessionStorePath string
 	)
 
 	//nolint:paralleltest
 	t.Run("Callback", func(t *testing.T) {
-		var (
-			csrfCookieName    = fmt.Sprintf("%s|%s", au.Name, "test-state")
-			csrfCookiePayload = &CSRFToken{PKCEVerifier: "verifier"}
-		)
-
-		csrfCookieValue, err := au.secure.Encode(csrfCookieName, csrfCookiePayload)
+		csrfCookie, err := au.makeSecureCookie(&CSRFToken{PKCEVerifier: "verifier"}, au.csrfCookieName("test-state"))
 		require.NoError(t, err)
-
-		csrfCookie := au.makeCookie(csrfCookieValue)
-		csrfCookie.Name = csrfCookieName
 
 		r := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=test-state&code=test-code", nil)
 		r.AddCookie(csrfCookie)
@@ -476,19 +470,16 @@ func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 
 		sessionStorePath = entries[0]
 
-		cookieHeaderValue := rw.Header().Values("Set-Cookie")[1]
-		require.NotEmpty(t, cookieHeaderValue)
-
-		t.Log(cookieHeaderValue)
-
-		authCookie, err = http.ParseSetCookie(cookieHeaderValue)
-		require.NoError(t, err)
+		authCookies = rw.Result().Cookies()
 	})
 
 	//nolint:paralleltest
 	t.Run("AuthenticateWithValidToken", func(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
-		r.AddCookie(authCookie)
+
+		for _, cookie := range authCookies {
+			r.AddCookie(cookie)
+		}
 
 		s, err := au.AuthenticateRequest(&pkgtest.TestOIDCConfiguration{}, make(http.Header), r)
 		require.NoError(t, err)
@@ -496,12 +487,15 @@ func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 		assert.Equal(t, "admin", s.UID)
 	})
 
-	var authCookie2 *http.Cookie
+	var authCookies2 []*http.Cookie
 
 	//nolint:paralleltest
 	t.Run("AuthenticateWithExpiredTokenDoRefresh", func(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
-		r.AddCookie(authCookie)
+
+		for _, cookie := range authCookies {
+			r.AddCookie(cookie)
+		}
 
 		cfg := new(pkgtest.TestOIDCConfiguration)
 		cfg.ClockAdjust = time.Hour * 2
@@ -534,19 +528,23 @@ func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 
 		assert.False(t, ctx.Storage().Exists(ctx, sessionStorePath))
 
-		cookieHeaderValue := hdr.Values("Set-Cookie")[0]
-		require.NotEmpty(t, cookieHeaderValue)
+		for _, headerValue := range hdr.Values("Set-Cookie") {
+			cookie, err := http.ParseSetCookie(headerValue)
+			require.NoError(t, err)
 
-		t.Log(cookieHeaderValue)
+			authCookies2 = append(authCookies2, cookie)
+		}
 
-		authCookie2, err = http.ParseSetCookie(cookieHeaderValue)
-		require.NoError(t, err)
+		require.NotEmpty(t, authCookies2)
 	})
 
 	//nolint:paralleltest
 	t.Run("AuthenticateAgainWithSameExpiredToken", func(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
-		r.AddCookie(authCookie)
+
+		for _, cookie := range authCookies {
+			r.AddCookie(cookie)
+		}
 
 		cfg := new(pkgtest.TestOIDCConfiguration)
 		cfg.ClockAdjust = time.Hour * 2
@@ -559,7 +557,10 @@ func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 	//nolint:paralleltest
 	t.Run("AuthenticateWithExpiredRefreshToken", func(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
-		r.AddCookie(authCookie2)
+
+		for _, cookie := range authCookies2 {
+			r.AddCookie(cookie)
+		}
 
 		cfg := new(pkgtest.TestOIDCConfiguration)
 		cfg.ClockAdjust = time.Hour * 4
