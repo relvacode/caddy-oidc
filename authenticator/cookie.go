@@ -305,10 +305,10 @@ func (au *SessionCookieAuthenticator) refreshCookieName() string {
 	return au.Name + "|refresh"
 }
 
-// makeSecureCookie creates a new http.Cookie using the SessionCookieAuthenticator configuration
+// encodeCookie creates a new http.Cookie using the SessionCookieAuthenticator configuration
 // from a payload to be passed to the secure cookie signer.
 // If v is nil, then the cookie is given no value.
-func (au *SessionCookieAuthenticator) makeSecureCookie(payload any, name string) (*http.Cookie, error) {
+func (au *SessionCookieAuthenticator) encodeCookie(payload any, name string) (*http.Cookie, error) {
 	var value string
 
 	if payload != nil {
@@ -330,6 +330,21 @@ func (au *SessionCookieAuthenticator) makeSecureCookie(payload any, name string)
 		HttpOnly: true,
 		Secure:   !au.Insecure,
 	}, nil
+}
+
+// decodeCookie reads a named cookie from the HTTP request and decodes it, verifying the signature.
+func (au *SessionCookieAuthenticator) decodeCookie(r *http.Request, name string, into any) error {
+	cookie, err := r.Cookie(name)
+	if err != nil {
+		return caddyhttp.Error(http.StatusBadRequest, err)
+	}
+
+	err = au.secure.Decode(name, cookie.Value, into)
+	if err != nil {
+		return caddyhttp.Error(http.StatusBadRequest, err)
+	}
+
+	return nil
 }
 
 func (*SessionCookieAuthenticator) storageKeyForID(id string) string {
@@ -379,7 +394,7 @@ func (au *SessionCookieAuthenticator) storeRefreshToken(ctx context.Context, hdr
 		return fmt.Errorf("failed to store refresh token session: %w", err)
 	}
 
-	refreshSessionCookie, err := au.makeSecureCookie(&RefreshSession{ID: id, Secret: secret}, au.refreshCookieName())
+	refreshSessionCookie, err := au.encodeCookie(&RefreshSession{ID: id, Secret: secret}, au.refreshCookieName())
 	if err != nil {
 		return err
 	}
@@ -452,7 +467,7 @@ func (au *SessionCookieAuthenticator) convertOAuthTokenIntoStoredSession(ctx con
 		}
 	}
 
-	sessionCookie, err := au.makeSecureCookie(s, au.sessionCookieName())
+	sessionCookie, err := au.encodeCookie(s, au.sessionCookieName())
 	if err != nil {
 		return nil, err
 	}
@@ -522,40 +537,38 @@ func (au *SessionCookieAuthenticator) tryRefreshSession(ctx context.Context, cfg
 		return nil, false, nil
 	}
 
-	refreshCookie, err := r.Cookie(au.refreshCookieName())
+	var refreshSession = new(RefreshSession)
+
+	err := au.decodeCookie(r, au.refreshCookieName(), refreshSession)
 	if err != nil {
 		if errors.Is(err, http.ErrNoCookie) {
 			return nil, false, nil
 		}
 
-		return nil, false, fmt.Errorf("failed to read refresh cookie: %w", err)
+		return nil, false, err
 	}
-
-	// Unless successful, delete the refresh cookie from the client
-	var deleteRefreshCookie = true
-	defer func() {
-		if deleteRefreshCookie {
-			refreshCookie, _ = au.makeSecureCookie(nil, au.refreshCookieName())
-
-			//nolint:gosec // User controls whether the CSRF cookie is secure or not
-			refreshCookie.MaxAge = -1
-
-			if refreshCookie != nil {
-				hdr.Add("Set-Cookie", refreshCookie.String())
-			}
-		}
-	}()
-
-	var refreshSession = new(RefreshSession)
 
 	defer func() {
 		zero(refreshSession.Secret)
 	}()
 
-	err = au.secure.Decode(au.refreshCookieName(), refreshCookie.Value, refreshSession)
-	if err != nil {
-		return nil, false, fmt.Errorf("failed to decode refresh cookie: %w", err)
-	}
+	// Unless successful, delete the refresh cookie from the client
+	var deleteRefreshCookie = true
+	defer func() {
+		if !deleteRefreshCookie {
+			return
+		}
+
+		// Best-effort encode
+
+		cookieValue, _ := au.encodeCookie(nil, au.refreshCookieName())
+
+		if cookieValue != nil {
+			//nolint:gosec // User controls whether the CSRF cookie is secure or not
+			cookieValue.MaxAge = -1
+			hdr.Add("Set-Cookie", cookieValue.String())
+		}
+	}()
 
 	storagePath := au.storageKeyForID(refreshSession.ID)
 
@@ -621,18 +634,15 @@ func (au *SessionCookieAuthenticator) tryRefreshSession(ctx context.Context, cfg
 }
 
 func (au *SessionCookieAuthenticator) sessionFromRequest(cfg OIDCConfiguration, r *http.Request) (*session.Session, error) {
-	cookie, err := r.Cookie(au.sessionCookieName())
+	var s = new(session.Session)
+
+	err := au.decodeCookie(r, au.sessionCookieName(), s)
 	if err != nil {
 		if errors.Is(err, http.ErrNoCookie) {
 			return nil, ErrNoAuthentication
 		}
-	}
 
-	var s = new(session.Session)
-
-	err = au.secure.Decode(au.Name, cookie.Value, s)
-	if err != nil {
-		return nil, caddyhttp.Error(http.StatusBadRequest, err)
+		return nil, err
 	}
 
 	// It's unlikely that the browser would send a cookie set to expire at the same time the session does.
@@ -692,7 +702,7 @@ func (au *SessionCookieAuthenticator) StartLogin(cfg OIDCConfiguration, rw http.
 		csrfCookiePayload = &CSRFToken{PKCEVerifier: pkceVerifier, RedirectURI: r.RequestURI}
 	)
 
-	csrfCookie, err := au.makeSecureCookie(csrfCookiePayload, au.csrfCookieName(state))
+	csrfCookie, err := au.encodeCookie(csrfCookiePayload, au.csrfCookieName(state))
 	if err != nil {
 		return err
 	}
@@ -718,15 +728,18 @@ func (au *SessionCookieAuthenticator) StartLogin(cfg OIDCConfiguration, rw http.
 // handleCallbackParseCSRFCookie parses the CSRF cookie from the request and returns the CSRF token payload.
 // If any CSRF cookie is found, then a Set-Cookie is sent to remove the cookie from the client.
 func (au *SessionCookieAuthenticator) handleCallbackParseCSRFCookie(rw http.ResponseWriter, r *http.Request) (*CSRFToken, error) {
-	var csrfCookieName = au.csrfCookieName(r.FormValue("state"))
+	var (
+		csrfCookieName = au.csrfCookieName(r.FormValue("state"))
+		csrfToken      CSRFToken
+	)
 
-	csrfCookie, err := r.Cookie(csrfCookieName)
+	err := au.decodeCookie(r, csrfCookieName, &csrfToken)
 	if err != nil {
 		return nil, fmt.Errorf("invalid CSRF cookie: %w", err)
 	}
 
 	// Delete CSRF cookie
-	deleteCsrfCookie, err := au.makeSecureCookie(nil, csrfCookieName)
+	deleteCsrfCookie, err := au.encodeCookie(nil, csrfCookieName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create delete CSRF cookie: %w", err)
 	}
@@ -734,13 +747,6 @@ func (au *SessionCookieAuthenticator) handleCallbackParseCSRFCookie(rw http.Resp
 	deleteCsrfCookie.MaxAge = -1
 
 	http.SetCookie(rw, deleteCsrfCookie)
-
-	var csrfToken CSRFToken
-
-	err = au.secure.Decode(csrfCookieName, csrfCookie.Value, &csrfToken)
-	if err != nil {
-		return nil, fmt.Errorf("invalid CSRF cookie: %w", err)
-	}
 
 	return &csrfToken, nil
 }
@@ -794,9 +800,11 @@ func (au *SessionCookieAuthenticator) HandleCallback(cfg OIDCConfiguration, rw h
 }
 
 func (au *SessionCookieAuthenticator) StripRequest(r *http.Request) {
+	var stripCookieNames = []string{au.sessionCookieName(), au.refreshCookieName()}
+
 	// Read all cookies and only keep any that aren't our session cookie
 	cookies := slices.DeleteFunc(r.Cookies(), func(cookie *http.Cookie) bool {
-		return cookie.Name == au.Name
+		return slices.Contains(stripCookieNames, cookie.Name)
 	})
 
 	// Delete any original Cookie header

@@ -153,7 +153,7 @@ func TestSessionCookieAuthenticator_AuthenticateRequest_WithCookie(t *testing.T)
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	s := &session.Session{UID: "test"}
 
-	cookieValue, err := au.makeSecureCookie(s, au.sessionCookieName())
+	cookieValue, err := au.encodeCookie(s, au.sessionCookieName())
 	require.NoError(t, err)
 
 	r.AddCookie(cookieValue)
@@ -223,7 +223,7 @@ func TestSessionCookieAuthenticator_AuthenticateRequest_SessionExpired(t *testin
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	s := &session.Session{UID: "test", ExpiresAt: cfg.Now().Add(-time.Hour).Unix()}
 
-	cookieValue, err := au.makeSecureCookie(s, au.sessionCookieName())
+	cookieValue, err := au.encodeCookie(s, au.sessionCookieName())
 	require.NoError(t, err)
 
 	r.AddCookie(cookieValue)
@@ -255,7 +255,7 @@ func TestSessionCookieAuthenticator_Provision_64ByteSecret(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 
 	s := &session.Session{UID: "test"}
-	cookieValue, err := au.makeSecureCookie(s, au.sessionCookieName())
+	cookieValue, err := au.encodeCookie(s, au.sessionCookieName())
 	require.NoError(t, err)
 
 	r.AddCookie(cookieValue)
@@ -351,7 +351,7 @@ func TestSessionCookieAuthenticator_HandleCallback_CopiesClaimsAsRawJSON(t *test
 
 	r := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state="+state+"&code=test-code", nil)
 
-	csrfCookie, err := au.makeSecureCookie(&CSRFToken{
+	csrfCookie, err := au.encodeCookie(&CSRFToken{
 		PKCEVerifier: "test-pkce-verifier",
 		RedirectURI:  "/original",
 	}, au.csrfCookieName(state))
@@ -437,7 +437,7 @@ func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 
 	//nolint:paralleltest
 	t.Run("Callback", func(t *testing.T) {
-		csrfCookie, err := au.makeSecureCookie(&CSRFToken{PKCEVerifier: "verifier"}, au.csrfCookieName("test-state"))
+		csrfCookie, err := au.encodeCookie(&CSRFToken{PKCEVerifier: "verifier"}, au.csrfCookieName("test-state"))
 		require.NoError(t, err)
 
 		r := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=test-state&code=test-code", nil)
