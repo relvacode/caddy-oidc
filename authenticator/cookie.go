@@ -620,19 +620,17 @@ func (au *SessionCookieAuthenticator) tryRefreshSession(ctx context.Context, cfg
 	return s, true, nil
 }
 
-func (au *SessionCookieAuthenticator) AuthenticateRequest(cfg OIDCConfiguration, hdr http.Header, r *http.Request) (*session.Session, error) {
-	cookiePlain, err := r.Cookie(au.Name)
+func (au *SessionCookieAuthenticator) sessionFromRequest(cfg OIDCConfiguration, r *http.Request) (*session.Session, error) {
+	cookie, err := r.Cookie(au.sessionCookieName())
 	if err != nil {
 		if errors.Is(err, http.ErrNoCookie) {
-			return nil, caddyhttp.Error(http.StatusUnauthorized, ErrNoAuthentication)
+			return nil, ErrNoAuthentication
 		}
-
-		return nil, caddyhttp.Error(http.StatusBadRequest, err)
 	}
 
 	var s = new(session.Session)
 
-	err = au.secure.Decode(au.Name, cookiePlain.Value, s)
+	err = au.secure.Decode(au.Name, cookie.Value, s)
 	if err != nil {
 		return nil, caddyhttp.Error(http.StatusBadRequest, err)
 	}
@@ -640,13 +638,22 @@ func (au *SessionCookieAuthenticator) AuthenticateRequest(cfg OIDCConfiguration,
 	// It's unlikely that the browser would send a cookie set to expire at the same time the session does.
 	// But for completeness of security, we will check it here too.
 	err = s.ValidateClock(cfg.Now())
+	if err != nil {
+		return nil, err
+	}
+
+	return s, nil
+}
+
+func (au *SessionCookieAuthenticator) AuthenticateRequest(cfg OIDCConfiguration, hdr http.Header, r *http.Request) (*session.Session, error) {
+	s, err := au.sessionFromRequest(cfg, r)
 	if err == nil {
-		// Session is still valid, so it can be returned immediately
 		return s, nil
 	}
 
-	// If the session is expired, then attempt to refresh the token
-	if _, ok := errors.AsType[*oidc.TokenExpiredError](err); ok {
+	// If the session is expired either though expiry validation or by the client not sending the cookie,
+	// then attempt to refresh the session using the refresh cookie if one is available.
+	if _, ok := errors.AsType[*oidc.TokenExpiredError](err); ok || errors.Is(err, ErrNoAuthentication) {
 		var (
 			refreshErr error
 			refreshOk  bool
