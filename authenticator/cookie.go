@@ -80,7 +80,7 @@ type RefreshSession struct {
 func (rs *RefreshSession) MarshalBinary() ([]byte, error) {
 	out := make([]byte, 0, len(rs.ID)+len(rs.Secret))
 	out = append(out, rs.ID[:]...)
-	out = append(out, rs.Secret[:]...)
+	out = append(out, rs.Secret...)
 
 	return out, nil
 }
@@ -162,7 +162,7 @@ func (cookieSerializer) Serialize(src any) ([]byte, error) {
 	}
 }
 
-func (cookieSerializer) Deserialize(src []byte, dst interface{}) error {
+func (cookieSerializer) Deserialize(src []byte, dst any) error {
 	switch dst := dst.(type) {
 	case *[]byte:
 		*dst = src
@@ -618,11 +618,9 @@ func (au *SessionCookieAuthenticator) tryRefreshSession(ctx context.Context, cfg
 		}
 
 		// Best-effort encode
-
 		cookieValue, _ := au.encodeCookie(nil, au.refreshCookieName())
 
 		if cookieValue != nil {
-			//nolint:gosec // User controls whether the CSRF cookie is secure or not
 			cookieValue.MaxAge = -1
 			hdr.Add("Set-Cookie", cookieValue.String())
 		}

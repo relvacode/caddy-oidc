@@ -11,6 +11,7 @@ linters:
     - exhaustruct
     - ireturn
     - gomodguard
+    - varnamelen
   exclusions:
     rules:
       - path: '(.+)_test\.go'
@@ -38,20 +39,6 @@ linters:
           - revive
         text: "var-naming: don't use an underscore in package name"
   settings:
-    varnamelen:
-      ignore-names:
-        - au
-        - tt
-        - id
-      ignore-decls:
-        - rw http.ResponseWriter
-        - r *http.Request
-        - d *caddyfile.Dispenser
-        - w *httptest.ResponseRecorder
-        - u *url.URL
-        - s *session.Session
-        - s session.Session
-        - c *SessionCookie
     tagliatelle:
       case:
         rules:
