@@ -3,6 +3,7 @@ package authenticator
 import (
 	"context"
 	"crypto/rand"
+	"encoding"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -76,6 +77,26 @@ type RefreshSession struct {
 	Secret []byte `json:"s"`
 }
 
+func (rs *RefreshSession) MarshalBinary() ([]byte, error) {
+	out := make([]byte, 0, len(rs.ID)+len(rs.Secret))
+	out = append(out, rs.ID[:]...)
+	out = append(out, rs.Secret[:]...)
+
+	return out, nil
+}
+
+func (rs *RefreshSession) UnmarshalBinary(b []byte) error {
+	n := copy(rs.ID[:], b)
+	if n != len(rs.ID) {
+		return errors.New("invalid binary data")
+	}
+
+	rs.Secret = make([]byte, len(b)-n)
+	copy(rs.Secret, b[n:])
+
+	return nil
+}
+
 // CSRFToken is the CSRF cookie payload when perform an OAuth2 Authorization Flow.
 type CSRFToken struct {
 	PKCEVerifier string `json:"v"`
@@ -114,6 +135,43 @@ func introspectToken(ctx context.Context, tok *oauth2.Token, cfg OIDCConfigurati
 func zero(b []byte) {
 	for i := range b {
 		b[i] = 0
+	}
+}
+
+// cookieSerializer implements securecoookie.Serializer
+// with special support for binary encoding of types that support it to minimize total payload size.
+// For any other type, encoding/json is used.
+//
+// This allows for special serialization like *RefreshSession
+// where the binary representation is significantly smaller than the base64 JSON encoding.
+type cookieSerializer struct {
+}
+
+func (cookieSerializer) Serialize(src any) ([]byte, error) {
+	if src == nil {
+		return nil, nil
+	}
+
+	switch src := src.(type) {
+	case []byte:
+		return src, nil
+	case encoding.BinaryMarshaler:
+		return src.MarshalBinary()
+	default:
+		return json.Marshal(src)
+	}
+}
+
+func (cookieSerializer) Deserialize(src []byte, dst interface{}) error {
+	switch dst := dst.(type) {
+	case *[]byte:
+		*dst = src
+
+		return nil
+	case encoding.BinaryUnmarshaler:
+		return dst.UnmarshalBinary(src)
+	default:
+		return json.Unmarshal(src, dst)
 	}
 }
 
@@ -255,7 +313,7 @@ func (au *SessionCookieAuthenticator) Provision(ctx caddy.Context) error {
 	}
 
 	au.secure = securecookie.New(hashKey, blockKey)
-	au.secure.SetSerializer(&securecookie.JSONEncoder{})
+	au.secure.SetSerializer(cookieSerializer{})
 
 	if au.RedirectURL == "" {
 		au.RedirectURL = defaultRedirectURL

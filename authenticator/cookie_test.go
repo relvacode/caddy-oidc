@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"path"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 	"unsafe"
@@ -471,6 +472,15 @@ func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
 		sessionStorePath = entries[0]
 
 		authCookies = rw.Result().Cookies()
+
+		refreshTokenIndex := slices.IndexFunc(authCookies, func(c *http.Cookie) bool {
+			return c.Name == au.refreshCookieName()
+		})
+
+		require.GreaterOrEqual(t, refreshTokenIndex, 0)
+
+		refreshToken := authCookies[refreshTokenIndex]
+		t.Logf("Refresh token (%d bytes)\n%s", len(refreshToken.Value), refreshToken.Value)
 	})
 
 	//nolint:paralleltest
