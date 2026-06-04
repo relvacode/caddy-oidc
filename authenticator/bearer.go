@@ -39,7 +39,7 @@ func (*BearerAuthenticator) UnmarshalCaddyfile(_ *caddyfile.Dispenser) error {
 
 func (*BearerAuthenticator) Method() AuthMethod { return AuthMethodBearer }
 
-func (*BearerAuthenticator) AuthenticateRequest(cfg OIDCConfiguration, r *http.Request) (*session.Session, error) {
+func (*BearerAuthenticator) AuthenticateRequest(cfg OIDCConfiguration, _ http.Header, r *http.Request) (*session.Session, error) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
 		return nil, caddyhttp.Error(http.StatusUnauthorized, ErrNoAuthentication)

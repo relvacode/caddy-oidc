@@ -94,7 +94,7 @@ type TestRequestAuthenticator struct {
 
 func (TestRequestAuthenticator) Method() AuthMethod { return AuthMethodBearer }
 
-func (TestRequestAuthenticator) AuthenticateRequest(_ OIDCConfiguration, _ *http.Request) (*session.Session, error) {
+func (TestRequestAuthenticator) AuthenticateRequest(_ OIDCConfiguration, _ http.Header, _ *http.Request) (*session.Session, error) {
 	return &session.Session{UID: "test"}, nil
 }
 
@@ -113,7 +113,7 @@ func TestSet_AuthenticateRequest(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 
-	m, s, err := authenticatorSet.AuthenticateRequest(&cfg, r)
+	m, s, err := authenticatorSet.AuthenticateRequest(&cfg, make(http.Header), r)
 	require.NoError(t, err)
 	assert.Equal(t, AuthMethodBearer, m)
 	assert.Equal(t, "test", s.UID)
@@ -129,7 +129,7 @@ func TestSet_AuthenticateRequest_NoAuthentication_Optional(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 
-	m, s, err := set.AuthenticateRequest(&cfg, r)
+	m, s, err := set.AuthenticateRequest(&cfg, make(http.Header), r)
 	require.NoError(t, err)
 	assert.Equal(t, AuthMethodNone, m)
 	assert.True(t, s.Anonymous)
@@ -147,7 +147,7 @@ func TestSet_AuthenticateRequest_NoAuthentication_Required(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 
-	_, _, err := set.AuthenticateRequest(&cfg, r)
+	_, _, err := set.AuthenticateRequest(&cfg, make(http.Header), r)
 
 	var ce caddyhttp.HandlerError
 	if assert.ErrorAs(t, err, &ce) {
@@ -162,7 +162,7 @@ type SendExpiredError struct {
 func (SendExpiredError) Method() AuthMethod           { return AuthMethodNone }
 func (SendExpiredError) StripRequest(_ *http.Request) {}
 
-func (SendExpiredError) AuthenticateRequest(_ OIDCConfiguration, _ *http.Request) (*session.Session, error) {
+func (SendExpiredError) AuthenticateRequest(_ OIDCConfiguration, _ http.Header, _ *http.Request) (*session.Session, error) {
 	return nil, &oidc.TokenExpiredError{}
 }
 
@@ -176,7 +176,7 @@ func TestSet_AuthenticateRequest_HandlesExpired(t *testing.T) {
 	}
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	_, s, err := set.AuthenticateRequest(&pkgtest.TestOIDCConfiguration{}, r)
+	_, s, err := set.AuthenticateRequest(&pkgtest.TestOIDCConfiguration{}, make(http.Header), r)
 	require.NoError(t, err)
 	assert.True(t, s.Anonymous)
 }
@@ -190,7 +190,7 @@ func (*testAuthenticateCallCountImpl) Method() AuthMethod { return AuthMethodNon
 func (t *testAuthenticateCallCountImpl) StripRequest(_ *http.Request) {
 	t.StripRequestCalled++
 }
-func (t *testAuthenticateCallCountImpl) AuthenticateRequest(_ OIDCConfiguration, _ *http.Request) (*session.Session, error) {
+func (t *testAuthenticateCallCountImpl) AuthenticateRequest(_ OIDCConfiguration, _ http.Header, _ *http.Request) (*session.Session, error) {
 	t.AuthenticateCalled++
 
 	return session.Anonymous(), nil
@@ -238,7 +238,7 @@ type testGetAuthenticateImpl1 struct {
 
 func (testGetAuthenticateImpl1) Method() AuthMethod           { return AuthMethodNone }
 func (testGetAuthenticateImpl1) StripRequest(_ *http.Request) {}
-func (testGetAuthenticateImpl1) AuthenticateRequest(_ OIDCConfiguration, _ *http.Request) (*session.Session, error) {
+func (testGetAuthenticateImpl1) AuthenticateRequest(_ OIDCConfiguration, _ http.Header, _ *http.Request) (*session.Session, error) {
 	//nolint:nilnil
 	return nil, nil
 }
@@ -249,7 +249,7 @@ type testGetAuthenticateImpl2 struct {
 
 func (testGetAuthenticateImpl2) Method() AuthMethod           { return AuthMethodNone }
 func (testGetAuthenticateImpl2) StripRequest(_ *http.Request) {}
-func (testGetAuthenticateImpl2) AuthenticateRequest(_ OIDCConfiguration, _ *http.Request) (*session.Session, error) {
+func (testGetAuthenticateImpl2) AuthenticateRequest(_ OIDCConfiguration, _ http.Header, _ *http.Request) (*session.Session, error) {
 	//nolint:nilnil
 	return nil, nil
 }
@@ -260,7 +260,7 @@ type testGetAuthenticateImpl3 struct {
 
 func (testGetAuthenticateImpl3) Method() AuthMethod           { return AuthMethodNone }
 func (testGetAuthenticateImpl3) StripRequest(_ *http.Request) {}
-func (testGetAuthenticateImpl3) AuthenticateRequest(_ OIDCConfiguration, _ *http.Request) (*session.Session, error) {
+func (testGetAuthenticateImpl3) AuthenticateRequest(_ OIDCConfiguration, _ http.Header, _ *http.Request) (*session.Session, error) {
 	//nolint:nilnil
 	return nil, nil
 }

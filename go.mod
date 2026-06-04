@@ -1,6 +1,6 @@
 module github.com/relvacode/caddy-oidc
 
-go 1.25.9
+go 1.26
 
 require (
 	github.com/caddyserver/caddy/v2 v2.11.2

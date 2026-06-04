@@ -2,10 +2,13 @@ package authenticator
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 	"unsafe"
@@ -20,6 +23,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
+
+	_ "github.com/caddyserver/caddy/v2/modules/filestorage"
 )
 
 func TestSessionCookieAuthenticator_UnmarshalCaddyfile(t *testing.T) {
@@ -147,14 +152,14 @@ func TestSessionCookieAuthenticator_AuthenticateRequest_WithCookie(t *testing.T)
 	require.NoError(t, err)
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
-
 	s := &session.Session{UID: "test"}
-	cookieValue, err := au.secure.Encode(au.Name, s)
+
+	cookieValue, err := au.encodeCookie(s, au.sessionCookieName())
 	require.NoError(t, err)
 
-	r.AddCookie(au.NewCookie(cookieValue))
+	r.AddCookie(cookieValue)
 
-	s, err = au.AuthenticateRequest(&cfg, r)
+	s, err = au.AuthenticateRequest(&cfg, make(http.Header), r)
 	if assert.NoError(t, err) {
 		assert.Equal(t, "test", s.UID)
 	}
@@ -182,12 +187,15 @@ func TestSessionCookieAuthenticator_AuthenticateRequest_WithCookieSignedByOther(
 	s := &session.Session{UID: "test"}
 	cookieSigner := securecookie.New([]byte("EPb6FR6Uehz2uWdfhtb7l6c4tXzgMJT8"), []byte("EPb6FR6Uehz2uWdfhtb7l6c4tXzgMJT8"))
 
-	cookie, err := cookieSigner.Encode(au.Name, s)
+	cookieValue, err := cookieSigner.Encode(au.Name, s)
 	require.NoError(t, err)
 
-	r.AddCookie(au.NewCookie(cookie))
+	r.AddCookie(&http.Cookie{
+		Name:  au.sessionCookieName(),
+		Value: cookieValue,
+	})
 
-	_, err = au.AuthenticateRequest(&cfg, r)
+	_, err = au.AuthenticateRequest(&cfg, make(http.Header), r)
 	require.Error(t, err)
 
 	var he caddyhttp.HandlerError
@@ -214,15 +222,18 @@ func TestSessionCookieAuthenticator_AuthenticateRequest_SessionExpired(t *testin
 	require.NoError(t, err)
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
-
 	s := &session.Session{UID: "test", ExpiresAt: cfg.Now().Add(-time.Hour).Unix()}
-	cookieValue, err := au.secure.Encode(au.Name, s)
+
+	cookieValue, err := au.encodeCookie(s, au.sessionCookieName())
 	require.NoError(t, err)
 
-	r.AddCookie(au.NewCookie(cookieValue))
+	r.AddCookie(cookieValue)
 
-	_, err = au.AuthenticateRequest(&cfg, r)
+	hdr := make(http.Header)
+	_, err = au.AuthenticateRequest(&cfg, hdr, r)
 	require.Error(t, err)
+
+	assert.Empty(t, hdr.Get("Set-Cookie"))
 
 	var ee *oidc.TokenExpiredError
 	assert.ErrorAs(t, err, &ee)
@@ -245,14 +256,14 @@ func TestSessionCookieAuthenticator_Provision_64ByteSecret(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 
 	s := &session.Session{UID: "test"}
-	cookieValue, err := au.secure.Encode(au.Name, s)
+	cookieValue, err := au.encodeCookie(s, au.sessionCookieName())
 	require.NoError(t, err)
 
-	r.AddCookie(au.NewCookie(cookieValue))
+	r.AddCookie(cookieValue)
 
-	session, err := au.AuthenticateRequest(&pkgtest.TestOIDCConfiguration{}, r)
+	newSession, err := au.AuthenticateRequest(&pkgtest.TestOIDCConfiguration{}, make(http.Header), r)
 	require.NoError(t, err)
-	assert.Equal(t, "test", session.UID)
+	assert.Equal(t, "test", newSession.UID)
 }
 
 func TestSessionCookieAuthenticator_StripRequest(t *testing.T) {
@@ -315,7 +326,6 @@ func newTestUserInfo(t *testing.T, claims string) *oidc.UserInfo {
 	claimsField := reflect.ValueOf(userInfo).Elem().FieldByName("claims")
 	require.True(t, claimsField.IsValid())
 
-	//nolint:gosec // This is only used for testing
 	reflect.NewAt(claimsField.Type(), unsafe.Pointer(claimsField.UnsafeAddr())).
 		Elem().
 		SetBytes([]byte(claims))
@@ -340,15 +350,15 @@ func TestSessionCookieAuthenticator_HandleCallback_CopiesClaimsAsRawJSON(t *test
 
 	const state = "test-state"
 
-	csrfCookieValue, err := au.secure.Encode(au.Name+"|"+state, &CSRFToken{
+	r := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state="+state+"&code=test-code", nil)
+
+	csrfCookie, err := au.encodeCookie(&CSRFToken{
 		PKCEVerifier: "test-pkce-verifier",
 		RedirectURI:  "/original",
-	})
+	}, au.csrfCookieName(state))
+
 	require.NoError(t, err)
 
-	r := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state="+state+"&code=test-code", nil)
-	csrfCookie := au.NewCookie(csrfCookieValue)
-	csrfCookie.Name = au.Name + "|" + state
 	r.AddCookie(csrfCookie)
 
 	cfg := &testHandleCallbackConfiguration{
@@ -394,4 +404,192 @@ func TestSessionCookieAuthenticator_HandleCallback_CopiesClaimsAsRawJSON(t *test
 		"roles": ["admin", "user"],
 		"email_verified": true
 	}`, string(s.Claims))
+}
+
+//nolint:tparallel // Tests need to run in order
+func TestSessionCookieAuthenticator_RefreshToken(t *testing.T) {
+	t.Parallel()
+
+	au := &SessionCookieAuthenticator{
+		Name:    "test-cookie",
+		Secret:  "Y4lbVNr01M4NyBCUSNbrAL4cavA6kjdM",
+		Claims:  []string{},
+		Refresh: true,
+	}
+
+	storageRaw, err := json.Marshal(map[string]any{
+		"module": "file_system",
+		"root":   t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	ctx, err := caddy.ProvisionContext(&caddy.Config{
+		StorageRaw: storageRaw,
+	})
+	require.NoError(t, err)
+
+	err = au.Provision(ctx)
+	require.NoError(t, err)
+
+	var (
+		authCookies      []*http.Cookie
+		sessionStorePath string
+	)
+
+	//nolint:paralleltest
+	t.Run("Callback", func(t *testing.T) {
+		csrfCookie, err := au.encodeCookie(&CSRFToken{PKCEVerifier: "verifier"}, au.csrfCookieName("test-state"))
+		require.NoError(t, err)
+
+		r := httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=test-state&code=test-code", nil)
+		r.AddCookie(csrfCookie)
+
+		rw := httptest.NewRecorder()
+
+		cfg := new(pkgtest.TestOIDCConfiguration)
+		cfg.ExchangeFunc = func(_ context.Context, code string, _ ...oauth2.AuthCodeOption) (*oauth2.Token, error) {
+			assert.Equal(t, "test-code", code)
+
+			tok := &oauth2.Token{RefreshToken: "test-refresh-token", ExpiresIn: 3600}
+
+			return tok.WithExtra(map[string]any{"id_token": pkgtest.GenerateTestJWTExpiresAt(cfg.Now().Add(time.Hour))}), nil
+		}
+		cfg.UserInfoFunc = func(_ context.Context, _ oauth2.TokenSource) (*oidc.UserInfo, error) {
+			return newTestUserInfo(t, `{
+				"sub": "admin",
+				"preferred_username": "admin",
+				"email_verified": true
+			}`), nil
+		}
+
+		err = au.HandleCallback(cfg, rw, r)
+		require.NoError(t, err)
+
+		entries, err := ctx.Storage().List(ctx, path.Join("oidc", "sessions"), false)
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+
+		sessionStorePath = entries[0]
+
+		authCookies = rw.Result().Cookies()
+
+		refreshTokenIndex := slices.IndexFunc(authCookies, func(c *http.Cookie) bool {
+			return c.Name == au.refreshCookieName()
+		})
+
+		require.GreaterOrEqual(t, refreshTokenIndex, 0)
+
+		refreshToken := authCookies[refreshTokenIndex]
+		t.Logf("Refresh token (%d bytes)\n%s", len(refreshToken.Value), refreshToken.Value)
+	})
+
+	//nolint:paralleltest
+	t.Run("AuthenticateWithValidToken", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+
+		for _, cookie := range authCookies {
+			r.AddCookie(cookie)
+		}
+
+		s, err := au.AuthenticateRequest(&pkgtest.TestOIDCConfiguration{}, make(http.Header), r)
+		require.NoError(t, err)
+
+		assert.Equal(t, "admin", s.UID)
+	})
+
+	var authCookies2 []*http.Cookie
+
+	//nolint:paralleltest
+	t.Run("AuthenticateWithExpiredTokenDoRefresh", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+
+		for _, cookie := range authCookies {
+			r.AddCookie(cookie)
+		}
+
+		cfg := new(pkgtest.TestOIDCConfiguration)
+		cfg.ClockAdjust = time.Hour * 2
+		cfg.UserInfoFunc = func(_ context.Context, _ oauth2.TokenSource) (*oidc.UserInfo, error) {
+			return newTestUserInfo(t, `{
+				"sub": "admin2",
+				"preferred_username": "admin",
+				"email_verified": true
+			}`), nil
+		}
+
+		var refreshCalled bool
+
+		cfg.RefreshFunc = func(_ context.Context, refreshToken string) (*oauth2.Token, error) {
+			refreshCalled = true
+
+			assert.Equal(t, "test-refresh-token", refreshToken)
+
+			tok := &oauth2.Token{RefreshToken: "test-refresh-token2", ExpiresIn: 3600}
+
+			return tok.WithExtra(map[string]any{"id_token": pkgtest.GenerateTestJWTExpiresAt(cfg.Now().Add(time.Hour))}), nil
+		}
+
+		hdr := make(http.Header)
+		s, err := au.AuthenticateRequest(cfg, hdr, r)
+		require.NoError(t, err)
+
+		assert.Equal(t, "admin2", s.UID)
+		assert.True(t, refreshCalled)
+
+		assert.False(t, ctx.Storage().Exists(ctx, sessionStorePath))
+
+		for _, headerValue := range hdr.Values("Set-Cookie") {
+			cookie, err := http.ParseSetCookie(headerValue)
+			require.NoError(t, err)
+
+			authCookies2 = append(authCookies2, cookie)
+		}
+
+		require.NotEmpty(t, authCookies2)
+	})
+
+	//nolint:paralleltest
+	t.Run("AuthenticateAgainWithSameExpiredToken", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+
+		for _, cookie := range authCookies {
+			r.AddCookie(cookie)
+		}
+
+		cfg := new(pkgtest.TestOIDCConfiguration)
+		cfg.ClockAdjust = time.Hour * 2
+
+		_, err := au.AuthenticateRequest(cfg, make(http.Header), r)
+		t.Log(err)
+		require.Error(t, err)
+	})
+
+	//nolint:paralleltest
+	t.Run("AuthenticateWithExpiredRefreshToken", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+
+		for _, cookie := range authCookies2 {
+			r.AddCookie(cookie)
+		}
+
+		cfg := new(pkgtest.TestOIDCConfiguration)
+		cfg.ClockAdjust = time.Hour * 4
+
+		var refreshCalled bool
+
+		cfg.RefreshFunc = func(_ context.Context, _ string) (*oauth2.Token, error) {
+			refreshCalled = true
+
+			return nil, &oauth2.RetrieveError{
+				ErrorCode: "invalid_grant",
+			}
+		}
+
+		_, err := au.AuthenticateRequest(cfg, make(http.Header), r)
+
+		assert.True(t, refreshCalled)
+
+		var te *oidc.TokenExpiredError
+		require.ErrorAs(t, err, &te)
+	})
 }

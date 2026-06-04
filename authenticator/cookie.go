@@ -2,17 +2,23 @@ package authenticator
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/url"
+	"path"
 	"slices"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/caddyserver/certmagic"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
 	"github.com/gorilla/securecookie"
@@ -20,6 +26,8 @@ import (
 	"github.com/relvacode/caddy-oidc/session"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"go.uber.org/zap"
+	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/oauth2"
 )
 
@@ -32,20 +40,15 @@ func init() {
 const (
 	defaultCookiePath  = "/"
 	defaultRedirectURL = "/oauth2/callback"
+
+	byteSizeU64 = 8
+
+	refreshCookieMaxAge = 30 * 24 * time.Hour
+	csrfCookieMaxAge    = 15 * time.Minute
 )
 
 // ErrNoIDToken is returned when an OAuth2 code exchange response does not contain an ID token.
 var ErrNoIDToken = errors.New("authentication server did not return an ID token")
-
-// OAuthAuthorizationFlowConfiguration represents the configuration required
-// to implement an OAuth2 Authorization Code Flow.
-type OAuthAuthorizationFlowConfiguration interface {
-	OIDCConfiguration
-
-	AuthCodeURL(ctx context.Context, state string, opts ...oauth2.AuthCodeOption) (string, error)
-	Exchange(ctx context.Context, code string, opts ...oauth2.AuthCodeOption) (*oauth2.Token, error)
-	UserInfo(ctx context.Context, tokenSource oauth2.TokenSource) (*oidc.UserInfo, error)
-}
 
 // SameSite represents the same site attribute of a cookie.
 // ENUM(lax, strict, none, default = "")
@@ -63,6 +66,112 @@ func (ss SameSite) HTTPSameSite() http.SameSite {
 		return http.SameSiteDefaultMode
 	default:
 		return http.SameSiteDefaultMode
+	}
+}
+
+// RefreshSession is the secure cookie JSON payload that stores refresh session information.
+type RefreshSession struct {
+	ID uuid.UUID `json:"id"`
+	// Secret is the unique refresh session token secret.
+	// This is used to decrypt the refresh token stored in the session storage.
+	Secret []byte `json:"s"`
+}
+
+func (rs *RefreshSession) MarshalBinary() ([]byte, error) {
+	out := make([]byte, 0, len(rs.ID)+len(rs.Secret))
+	out = append(out, rs.ID[:]...)
+	out = append(out, rs.Secret...)
+
+	return out, nil
+}
+
+func (rs *RefreshSession) UnmarshalBinary(b []byte) error {
+	n := copy(rs.ID[:], b)
+	if n != len(rs.ID) {
+		return errors.New("invalid binary data")
+	}
+
+	rs.Secret = make([]byte, len(b)-n)
+	copy(rs.Secret, b[n:])
+
+	return nil
+}
+
+// CSRFToken is the CSRF cookie payload when perform an OAuth2 Authorization Flow.
+type CSRFToken struct {
+	PKCEVerifier string `json:"v"`
+	RedirectURI  string `json:"r"`
+}
+
+func introspectToken(ctx context.Context, tok *oauth2.Token, cfg OIDCConfiguration) (*oidc.UserInfo, time.Time, string, error) {
+	idTokenPlain, ok := tok.Extra("id_token").(string)
+	if !ok {
+		return nil, time.Time{}, "", ErrNoIDToken
+	}
+
+	verifier, err := cfg.GetVerifier(ctx)
+	if err != nil {
+		return nil, time.Time{}, "", fmt.Errorf("failed to get verifier: %w", err)
+	}
+
+	_, err = verifier.Verify(ctx, idTokenPlain)
+	if err != nil {
+		return nil, time.Time{}, "", fmt.Errorf("failed to verify id_token: %w", err)
+	}
+
+	userInfo, err := cfg.UserInfo(ctx, oauth2.StaticTokenSource(tok))
+	if err != nil {
+		return nil, time.Time{}, "", fmt.Errorf("failed to fetch userinfo: %w", err)
+	}
+
+	var expires = tok.Expiry
+	if expires.IsZero() && tok.ExpiresIn > 0 {
+		expires = cfg.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
+	}
+
+	return userInfo, expires, tok.RefreshToken, nil
+}
+
+func zero(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}
+
+// cookieSerializer implements securecoookie.Serializer
+// with special support for binary encoding of types that support it to minimize total payload size.
+// For any other type, encoding/json is used.
+//
+// This allows for special serialization like *RefreshSession
+// where the binary representation is significantly smaller than the base64 JSON encoding.
+type cookieSerializer struct {
+}
+
+func (cookieSerializer) Serialize(src any) ([]byte, error) {
+	if src == nil {
+		return nil, nil
+	}
+
+	switch src := src.(type) {
+	case []byte:
+		return src, nil
+	case encoding.BinaryMarshaler:
+		return src.MarshalBinary()
+	default:
+		return json.Marshal(src)
+	}
+}
+
+func (cookieSerializer) Deserialize(src []byte, dst any) error {
+	switch dst := dst.(type) {
+	case *[]byte:
+		*dst = src
+
+		return nil
+	case encoding.BinaryUnmarshaler:
+		return dst.UnmarshalBinary(src)
+	default:
+		return json.Unmarshal(src, dst)
 	}
 }
 
@@ -84,8 +193,11 @@ type SessionCookieAuthenticator struct {
 	Secret      string   `json:"secret,omitempty"`
 	Claims      []string `json:"claims,omitempty"`
 	RedirectURL string   `json:"redirect_url,omitempty"`
+	Refresh     bool     `json:"refresh,omitempty"`
 
+	log         *zap.Logger
 	secure      *securecookie.SecureCookie
+	storage     certmagic.Storage
 	redirectURL *url.URL
 }
 
@@ -146,6 +258,8 @@ func (au *SessionCookieAuthenticator) UnmarshalCaddyfile(d *caddyfile.Dispenser)
 			if !d.Args(&au.RedirectURL) {
 				return d.ArgErr()
 			}
+		case "refresh":
+			au.Refresh = true
 		default:
 			return d.Errf("unrecognized cookie subdirective: %s", d.Val())
 		}
@@ -154,7 +268,9 @@ func (au *SessionCookieAuthenticator) UnmarshalCaddyfile(d *caddyfile.Dispenser)
 	return nil
 }
 
-func (au *SessionCookieAuthenticator) Provision(_ caddy.Context) error {
+func (au *SessionCookieAuthenticator) Provision(ctx caddy.Context) error {
+	au.log = ctx.Logger()
+
 	repl := caddy.NewReplacer()
 
 	var err error
@@ -197,7 +313,7 @@ func (au *SessionCookieAuthenticator) Provision(_ caddy.Context) error {
 	}
 
 	au.secure = securecookie.New(hashKey, blockKey)
-	au.secure.SetSerializer(&securecookie.JSONEncoder{})
+	au.secure.SetSerializer(cookieSerializer{})
 
 	if au.RedirectURL == "" {
 		au.RedirectURL = defaultRedirectURL
@@ -211,6 +327,10 @@ func (au *SessionCookieAuthenticator) Provision(_ caddy.Context) error {
 	au.redirectURL, err = url.Parse(au.RedirectURL)
 	if err != nil {
 		return fmt.Errorf("invalid redirect_url: %w", err)
+	}
+
+	if au.Refresh {
+		au.storage = ctx.Storage()
 	}
 
 	return nil
@@ -230,47 +350,393 @@ func (au *SessionCookieAuthenticator) Validate() error {
 
 func (*SessionCookieAuthenticator) Method() AuthMethod { return AuthMethodCookie }
 
-func (au *SessionCookieAuthenticator) AuthenticateRequest(cfg OIDCConfiguration, r *http.Request) (*session.Session, error) {
-	cookiePlain, err := r.Cookie(au.Name)
-	if err != nil {
-		if errors.Is(err, http.ErrNoCookie) {
-			return nil, caddyhttp.Error(http.StatusUnauthorized, ErrNoAuthentication)
-		}
-
-		return nil, caddyhttp.Error(http.StatusBadRequest, err)
-	}
-
-	var s session.Session
-
-	err = au.secure.Decode(au.Name, cookiePlain.Value, &s)
-	if err != nil {
-		return nil, caddyhttp.Error(http.StatusBadRequest, err)
-	}
-
-	err = s.ValidateClock(cfg.Now())
-	if err != nil {
-		return nil, err
-	}
-
-	return &s, nil
+func (au *SessionCookieAuthenticator) sessionCookieName() string {
+	return au.Name
 }
 
-func (au *SessionCookieAuthenticator) NewCookie(value string) *http.Cookie {
+func (au *SessionCookieAuthenticator) csrfCookieName(state string) string {
+	return au.Name + "|" + state
+}
+
+// refreshCookieName returns the name of the refresh cookie.
+func (au *SessionCookieAuthenticator) refreshCookieName() string {
+	return au.Name + "|refresh"
+}
+
+// encodeCookie creates a new http.Cookie using the SessionCookieAuthenticator configuration
+// from a payload to be passed to the secure cookie signer.
+// If v is nil, then the cookie is given no value.
+func (au *SessionCookieAuthenticator) encodeCookie(payload any, name string) (*http.Cookie, error) {
+	var value string
+
+	if payload != nil {
+		var err error
+
+		value, err = au.secure.Encode(name, payload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode session cookie: %w", err)
+		}
+	}
+
+	//nolint:gosec // User controls whether the CSRF cookie is secure or not
 	return &http.Cookie{
-		Name:     au.Name,
+		Name:     name,
 		Value:    value,
 		SameSite: au.SameSite.HTTPSameSite(),
 		Path:     au.Path,
 		Domain:   au.Domain,
 		HttpOnly: true,
 		Secure:   !au.Insecure,
-	}
+	}, nil
 }
 
-// CSRFToken is the CSRF cookie payload when perform an OAuth2 Authorization Flow.
-type CSRFToken struct {
-	PKCEVerifier string `json:"v"`
-	RedirectURI  string `json:"r"`
+// decodeCookie reads a named cookie from the HTTP request and decodes it, verifying the signature.
+func (au *SessionCookieAuthenticator) decodeCookie(r *http.Request, name string, into any) error {
+	cookie, err := r.Cookie(name)
+	if err != nil {
+		return caddyhttp.Error(http.StatusBadRequest, err)
+	}
+
+	err = au.secure.Decode(name, cookie.Value, into)
+	if err != nil {
+		return caddyhttp.Error(http.StatusBadRequest, err)
+	}
+
+	return nil
+}
+
+func (*SessionCookieAuthenticator) storageKeyForID(id uuid.UUID) string {
+	return path.Join("oidc", "sessions", id.String())
+}
+
+// storeRefreshToken generates and stores a new refresh session into the configured storage of this authenticator.
+// It assumes that this authenticator has a valid storage configuration enabled.
+//
+// When a refresh session is generated, a session identifier is derived
+// and a 32-byte XCHACHA20-POLY1305 key is generated.
+//
+// The refresh token is encrypted using this key using random nonce
+// and stored in the storage implementation, keyed by the unique identifier.
+// Only the client has the secret needed to decrypt their refresh token.
+func (au *SessionCookieAuthenticator) storeRefreshToken(ctx context.Context, hdr http.Header, refreshToken string) error {
+	var (
+		id     = uuid.New()
+		secret = make([]byte, chacha20poly1305.KeySize)
+		nonce  = make([]byte, chacha20poly1305.NonceSizeX)
+	)
+
+	// rand.Read never returns an error
+	_, _ = rand.Read(secret)
+	_, _ = rand.Read(nonce)
+
+	aead, err := chacha20poly1305.NewX(secret)
+	if err != nil {
+		return fmt.Errorf("failed to create AEAD: %w", err)
+	}
+
+	// Format:
+	// Unix timestamp, 32 byte None, Payload.
+	// The timestamp is currently unused but may be used in the future for token expiration.
+	sealed := make([]byte, byteSizeU64+chacha20poly1305.NonceSizeX, byteSizeU64+chacha20poly1305.NonceSizeX+len(refreshToken)+chacha20poly1305.Overhead)
+
+	//nolint:gosec // int64 -> uint64 is perfectly valid
+	binary.LittleEndian.PutUint64(sealed[:byteSizeU64], uint64(time.Now().Unix()))
+	copy(sealed[byteSizeU64:], nonce)
+
+	sealed = aead.Seal(sealed, nonce, []byte(refreshToken), nil)
+
+	au.log.Debug("Storing new refresh token in persistent storage", zap.String("session_id", id.String()))
+
+	err = au.storage.Store(ctx, au.storageKeyForID(id), sealed)
+	if err != nil {
+		return fmt.Errorf("failed to store refresh token session: %w", err)
+	}
+
+	refreshSessionCookie, err := au.encodeCookie(&RefreshSession{ID: id, Secret: secret}, au.refreshCookieName())
+	if err != nil {
+		return err
+	}
+
+	refreshSessionCookie.MaxAge = int(refreshCookieMaxAge.Seconds())
+
+	hdr.Add("Set-Cookie", refreshSessionCookie.String())
+
+	return nil
+}
+
+// prepareSessionFromTokenExchange prepares a session from the token exchange response by extracting the userinfo claims
+// and copying the claims into the session's claims field.
+// The session's UID is set to the value of the userinfo claim specified by the provided OAuthAuthorizationFlowConfiguration.
+func (au *SessionCookieAuthenticator) prepareSessionFromTokenExchange(cfg OIDCConfiguration, userInfo *oidc.UserInfo, idTokenExpires time.Time) (*session.Session, error) { //nolint:lll
+	var jsonClaims *json.RawMessage
+
+	err := userInfo.Claims(&jsonClaims)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract claims from user info: %w", err)
+	}
+
+	uidJSON := gjson.GetBytes(*jsonClaims, cfg.GetUsernameClaim())
+	if !uidJSON.Exists() || uidJSON.Type != gjson.String {
+		return nil, fmt.Errorf("invalid response from user info endpoint: %w", session.MissingRequiredClaimError{Claim: cfg.GetUsernameClaim()})
+	}
+
+	s := session.Session{
+		UID:       uidJSON.String(),
+		Claims:    json.RawMessage(`{}`),
+		ExpiresAt: idTokenExpires.Unix(),
+	}
+
+	// Copy claims
+	claimValues := gjson.GetManyBytes(*jsonClaims, au.Claims...)
+	for i, claimValue := range claimValues {
+		if claimValue.Exists() {
+			s.Claims, err = sjson.SetRawBytes(s.Claims, au.Claims[i], []byte(claimValue.Raw))
+			if err != nil {
+				return nil, fmt.Errorf("failed to set claim %s: %w", au.Claims[i], err)
+			}
+		}
+	}
+
+	return &s, nil
+}
+
+// convertOAuthTokenIntoStoredSession performs all the necessary actions to convert an OAuth2 token response into a request session.
+// The OAuth2 token is introspected and used to populate the session claims and metadata.
+//
+// If the token contains a refresh token, then the refresh token is stored in the storage system for future use
+// and an additional cookie is stored in the provided response headers.
+func (au *SessionCookieAuthenticator) convertOAuthTokenIntoStoredSession(ctx context.Context, cfg OIDCConfiguration, hdr http.Header, tok *oauth2.Token) (*session.Session, error) { //nolint:lll
+	userInfo, idTokenExpires, refreshToken, err := introspectToken(ctx, tok, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect token: %w", err)
+	}
+
+	s, err := au.prepareSessionFromTokenExchange(cfg, userInfo, idTokenExpires)
+	if err != nil {
+		return nil, err
+	}
+
+	// If the code exchange provided a refresh token to use and this authenticator is configured to use session storage,
+	// then we will generate and store a new refresh session in the configured storage.
+	if refreshToken != "" && au.storage != nil {
+		err = au.storeRefreshToken(ctx, hdr, refreshToken)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate and store a refresh token session: %w", err)
+		}
+	}
+
+	sessionCookie, err := au.encodeCookie(s, au.sessionCookieName())
+	if err != nil {
+		return nil, err
+	}
+
+	sessionCookie.Expires = idTokenExpires
+
+	hdr.Add("Set-Cookie", sessionCookie.String())
+
+	return s, nil
+}
+
+// decryptRefreshTokenFromStorage decrypts the stored refresh token in storage for the provided RefreshSession.
+// It returns the plain text refresh token or an error if decryption fails.
+// If present, the session is always deleted from storage.
+// It does not hold a lock on the storage implementation.
+// If there is no refresh token stored in the storage system, then it returns fs.ErrNotExist.
+func (au *SessionCookieAuthenticator) decryptRefreshTokenFromStorage(ctx context.Context, refreshSession *RefreshSession) (string, error) {
+	var storagePath = au.storageKeyForID(refreshSession.ID)
+
+	refreshTokenSealed, err := au.storage.Load(ctx, storagePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to load refresh token session: %w", err)
+	}
+
+	// Always drop the session from Caddy storage
+	defer func() {
+		_ = au.storage.Delete(ctx, storagePath)
+	}()
+
+	if len(refreshTokenSealed) < (byteSizeU64 + chacha20poly1305.NonceSizeX + chacha20poly1305.Overhead) {
+		return "", errors.New("sealed refresh token session is too short")
+	}
+
+	var (
+		nonce  = refreshTokenSealed[byteSizeU64 : byteSizeU64+chacha20poly1305.NonceSizeX]
+		sealed = refreshTokenSealed[byteSizeU64+chacha20poly1305.NonceSizeX:]
+	)
+
+	aead, err := chacha20poly1305.NewX(refreshSession.Secret)
+	if err != nil {
+		return "", fmt.Errorf("failed to create AEAD: %w", err)
+	}
+
+	plaintext, err := aead.Open(nil, nonce, sealed, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to decrypt refresh token session: %w", err)
+	}
+
+	return string(plaintext), nil
+}
+
+// tryRefreshSession attempts to automatically refresh session credentials using the refresh session
+// stored in the request cookies.
+//
+// If the request does not contain a refresh session cookie, or this authenticator is not configured with
+// a storage implementation, then a session can never be refreshed and false is returned.
+//
+// If the session was successfully refreshed, then the session cookie is updated in-place with
+// the new session information retrieved from the token exchange as well as storing a new refresh session
+// if the exchange provided a new one.
+//
+// If the refresh fails due to `invalid_grant`, it assumes that the refresh token is no longer valid.
+//
+//nolint:funlen
+func (au *SessionCookieAuthenticator) tryRefreshSession(ctx context.Context, cfg OIDCConfiguration, hdr http.Header, r *http.Request) (*session.Session, bool, error) { //nolint:lll
+	if au.storage == nil {
+		return nil, false, nil
+	}
+
+	var refreshSession = new(RefreshSession)
+
+	err := au.decodeCookie(r, au.refreshCookieName(), refreshSession)
+	if err != nil {
+		if errors.Is(err, http.ErrNoCookie) {
+			return nil, false, nil
+		}
+
+		return nil, false, err
+	}
+
+	defer func() {
+		zero(refreshSession.Secret)
+	}()
+
+	// Unless successful, delete the refresh cookie from the client
+	var deleteRefreshCookie = true
+	defer func() {
+		if !deleteRefreshCookie {
+			return
+		}
+
+		// Best-effort encode
+		cookieValue, _ := au.encodeCookie(nil, au.refreshCookieName())
+
+		if cookieValue != nil {
+			cookieValue.MaxAge = -1
+			hdr.Add("Set-Cookie", cookieValue.String())
+		}
+	}()
+
+	storagePath := au.storageKeyForID(refreshSession.ID)
+
+	log := au.log.With(zap.String("session_id", refreshSession.ID.String()))
+	log.Debug("Trying to refresh session using stored refresh token")
+
+	// Lock the storage for this session.
+	// This prevents concurrent in-flight requests from attempting to refresh the same session at the same time.
+	err = au.storage.Lock(ctx, storagePath)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to lock refresh token session: %w", err)
+	}
+
+	defer func() {
+		_ = au.storage.Unlock(ctx, storagePath)
+	}()
+
+	refreshToken, err := au.decryptRefreshTokenFromStorage(ctx, refreshSession)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			log.Debug("Refresh token session is no longer valid, dropping session")
+
+			return nil, false, nil
+		}
+
+		return nil, false, fmt.Errorf("failed to decrypt refresh token session: %w", err)
+	}
+
+	// Exchange code for ID token
+	log.Debug("Found a valid refresh token, trying to refresh it with the provider")
+
+	tok, err := cfg.Refresh(ctx, refreshToken)
+	if err != nil {
+		log.Debug("Refresh token is no longer valid, dropping session")
+
+		// If the server gave an error related to the token,
+		// then we should assume that the refresh token is no longer valid.
+		// We don't want to make this a hard error as at this point the user should start a new login flow.
+		if oe, ok := errors.AsType[*oauth2.RetrieveError](err); ok {
+			switch oe.ErrorCode {
+			case "invalid_grant",
+				// Pocket ID specific workaround
+				// https://github.com/pocket-id/pocket-id/issues/1502
+				"Refresh token is invalid or expired":
+				return nil, false, nil
+			}
+		}
+
+		return nil, false, fmt.Errorf("failed to refresh token: %w", err)
+	}
+
+	log.Debug("Successfully refreshed token, updating session cookie with new token and refresh token")
+
+	// At this point we have a new refresh cookie to store, so we should no longer delete the refresh cookie from the client
+	deleteRefreshCookie = false
+
+	s, err := au.convertOAuthTokenIntoStoredSession(ctx, cfg, hdr, tok)
+	if err != nil {
+		return nil, false, err
+	}
+
+	return s, true, nil
+}
+
+func (au *SessionCookieAuthenticator) sessionFromRequest(cfg OIDCConfiguration, r *http.Request) (*session.Session, error) {
+	var s = new(session.Session)
+
+	err := au.decodeCookie(r, au.sessionCookieName(), s)
+	if err != nil {
+		if errors.Is(err, http.ErrNoCookie) {
+			return nil, ErrNoAuthentication
+		}
+
+		return nil, err
+	}
+
+	// It's unlikely that the browser would send a cookie set to expire at the same time the session does.
+	// But for completeness of security, we will check it here too.
+	err = s.ValidateClock(cfg.Now())
+	if err != nil {
+		return nil, err
+	}
+
+	return s, nil
+}
+
+func (au *SessionCookieAuthenticator) AuthenticateRequest(cfg OIDCConfiguration, hdr http.Header, r *http.Request) (*session.Session, error) {
+	s, err := au.sessionFromRequest(cfg, r)
+	if err == nil {
+		return s, nil
+	}
+
+	// If the session is expired either though expiry validation or by the client not sending the cookie,
+	// then attempt to refresh the session using the refresh cookie if one is available.
+	if _, ok := errors.AsType[*oidc.TokenExpiredError](err); ok || errors.Is(err, ErrNoAuthentication) {
+		var (
+			refreshErr error
+			refreshOk  bool
+		)
+
+		s, refreshOk, refreshErr = au.tryRefreshSession(r.Context(), cfg, hdr, r)
+		if refreshErr != nil {
+			return nil, fmt.Errorf("failed to refresh session: %w", refreshErr)
+		}
+
+		// Only when refresh is OK do we mask the original error
+		if refreshOk {
+			err = nil
+		}
+	}
+
+	return s, err
 }
 
 // GetAbsRedirectURI returns the absolute redirect URI, resolving it relative to the request URL if necessary.
@@ -285,22 +751,19 @@ func (au *SessionCookieAuthenticator) GetAbsRedirectURI(r *http.Request) *url.UR
 // StartLogin starts the authorization flow by setting the state cookie and redirecting to the authorization endpoint.
 // The state cookie is in the format of `<cookie_name>|<state>`, with the value containing the PKCE code verifier.
 // The OAuth2 redirect URI is set to the configured redirect URI made absolute relative to the request URL.
-func (au *SessionCookieAuthenticator) StartLogin(cfg OAuthAuthorizationFlowConfiguration, rw http.ResponseWriter, r *http.Request) error {
+func (au *SessionCookieAuthenticator) StartLogin(cfg OIDCConfiguration, rw http.ResponseWriter, r *http.Request) error {
 	var (
 		state             = uuid.New().String()
 		pkceVerifier      = oauth2.GenerateVerifier()
-		csrfCookieName    = fmt.Sprintf("%s|%s", au.Name, state)
 		csrfCookiePayload = &CSRFToken{PKCEVerifier: pkceVerifier, RedirectURI: r.RequestURI}
 	)
 
-	csrfCookieValue, err := au.secure.Encode(csrfCookieName, csrfCookiePayload)
+	csrfCookie, err := au.encodeCookie(csrfCookiePayload, au.csrfCookieName(state))
 	if err != nil {
 		return err
 	}
 
-	csrfCookie := au.NewCookie(csrfCookieValue)
-	csrfCookie.Name = csrfCookieName
-	csrfCookie.MaxAge = 900 // 15-minute short expiry time for the CSRF cookie
+	csrfCookie.MaxAge = int(csrfCookieMaxAge.Seconds())
 
 	http.SetCookie(rw, csrfCookie)
 
@@ -312,6 +775,7 @@ func (au *SessionCookieAuthenticator) StartLogin(cfg OAuthAuthorizationFlowConfi
 		return err
 	}
 
+	//nolint:gosec // Implicit trust in the auth code URL provided by the OIDC provider
 	http.Redirect(rw, r, authCodeURL, http.StatusFound)
 
 	return nil
@@ -320,66 +784,27 @@ func (au *SessionCookieAuthenticator) StartLogin(cfg OAuthAuthorizationFlowConfi
 // handleCallbackParseCSRFCookie parses the CSRF cookie from the request and returns the CSRF token payload.
 // If any CSRF cookie is found, then a Set-Cookie is sent to remove the cookie from the client.
 func (au *SessionCookieAuthenticator) handleCallbackParseCSRFCookie(rw http.ResponseWriter, r *http.Request) (*CSRFToken, error) {
-	var csrfCookieName = fmt.Sprintf("%s|%s", au.Name, r.FormValue("state"))
+	var (
+		csrfCookieName = au.csrfCookieName(r.FormValue("state"))
+		csrfToken      CSRFToken
+	)
 
-	csrfCookie, err := r.Cookie(csrfCookieName)
+	err := au.decodeCookie(r, csrfCookieName, &csrfToken)
 	if err != nil {
 		return nil, fmt.Errorf("invalid CSRF cookie: %w", err)
 	}
 
 	// Delete CSRF cookie
-	deleteCsrfCookie := au.NewCookie("")
-	deleteCsrfCookie.Name = csrfCookieName
+	deleteCsrfCookie, err := au.encodeCookie(nil, csrfCookieName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create delete CSRF cookie: %w", err)
+	}
+
 	deleteCsrfCookie.MaxAge = -1
 
 	http.SetCookie(rw, deleteCsrfCookie)
 
-	var csrfToken CSRFToken
-
-	err = au.secure.Decode(csrfCookieName, csrfCookie.Value, &csrfToken)
-	if err != nil {
-		return nil, fmt.Errorf("invalid CSRF cookie: %w", err)
-	}
-
 	return &csrfToken, nil
-}
-
-// handleCodeExchange performs the OAuth2 token exchange using the PKCE code Verifier.
-// It then verifies the ID token and returns the userinfo claims as well as the ID token expiry time.
-func (au *SessionCookieAuthenticator) handleCodeExchange(
-	cfg OAuthAuthorizationFlowConfiguration,
-	r *http.Request,
-	pkceVerifier string,
-) (*oidc.UserInfo, time.Time, error) {
-	response, err := cfg.Exchange(r.Context(), r.FormValue("code"),
-		oauth2.VerifierOption(pkceVerifier),
-		oauth2.SetAuthURLParam("redirect_uri", au.GetAbsRedirectURI(r).String()),
-	)
-	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("failed to exchange token: %w", err)
-	}
-
-	idTokenPlain, ok := response.Extra("id_token").(string)
-	if !ok {
-		return nil, time.Time{}, ErrNoIDToken
-	}
-
-	verifier, err := cfg.GetVerifier(r.Context())
-	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("failed to get verifier: %w", err)
-	}
-
-	_, err = verifier.Verify(r.Context(), idTokenPlain)
-	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("failed to verify id_token: %w", err)
-	}
-
-	userInfo, err := cfg.UserInfo(r.Context(), oauth2.StaticTokenSource(response))
-	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("failed to fetch userinfo: %w", err)
-	}
-
-	return userInfo, response.Expiry, nil
 }
 
 // IsCallbackURL returns true if the request is a callback from the authorization endpoint.
@@ -395,7 +820,7 @@ func (au *SessionCookieAuthenticator) IsCallbackURL(r *http.Request) bool {
 }
 
 // HandleCallback handles the callback from the authorization endpoint.
-func (au *SessionCookieAuthenticator) HandleCallback(cfg OAuthAuthorizationFlowConfiguration, rw http.ResponseWriter, r *http.Request) error {
+func (au *SessionCookieAuthenticator) HandleCallback(cfg OIDCConfiguration, rw http.ResponseWriter, r *http.Request) error {
 	if errValue := r.FormValue("error"); errValue != "" {
 		return caddyhttp.Error(http.StatusBadRequest, fmt.Errorf("error: %s, description: %s", errValue, r.FormValue("error_description")))
 	}
@@ -406,46 +831,18 @@ func (au *SessionCookieAuthenticator) HandleCallback(cfg OAuthAuthorizationFlowC
 	}
 
 	// Exchange code for ID token
-	userInfo, idTokenExpires, err := au.handleCodeExchange(cfg, r, csrfToken.PKCEVerifier)
+	tok, err := cfg.Exchange(r.Context(), r.FormValue("code"),
+		oauth2.VerifierOption(csrfToken.PKCEVerifier),
+		oauth2.SetAuthURLParam("redirect_uri", au.GetAbsRedirectURI(r).String()),
+	)
 	if err != nil {
-		return caddyhttp.Error(http.StatusBadRequest, err)
+		return fmt.Errorf("failed to exchange code for id_token: %w", err)
 	}
 
-	var jsonClaims *json.RawMessage
-
-	err = userInfo.Claims(&jsonClaims)
+	_, err = au.convertOAuthTokenIntoStoredSession(r.Context(), cfg, rw.Header(), tok)
 	if err != nil {
-		return fmt.Errorf("failed to extract claims from user info: %w", err)
+		return err
 	}
-
-	uidJSON := gjson.GetBytes(*jsonClaims, cfg.GetUsernameClaim())
-	if !uidJSON.Exists() || uidJSON.Type != gjson.String {
-		return fmt.Errorf("invalid response from user info endpoint: %w", session.MissingRequiredClaimError{Claim: cfg.GetUsernameClaim()})
-	}
-
-	s := &session.Session{
-		UID:       uidJSON.String(),
-		Claims:    json.RawMessage(`{}`),
-		ExpiresAt: idTokenExpires.Unix(),
-	}
-
-	// Copy claims
-	claimValues := gjson.GetManyBytes(*jsonClaims, au.Claims...)
-	for i, claimValue := range claimValues {
-		if claimValue.Exists() {
-			s.Claims, err = sjson.SetRawBytes(s.Claims, au.Claims[i], []byte(claimValue.Raw))
-			if err != nil {
-				return fmt.Errorf("failed to set claim %s: %w", au.Claims[i], err)
-			}
-		}
-	}
-
-	cookieValue, err := au.secure.Encode(au.Name, s)
-	if err != nil {
-		return fmt.Errorf("failed to encode session cookie: %w", err)
-	}
-
-	http.SetCookie(rw, au.NewCookie(cookieValue))
 
 	// Redirect to the configured redirect URI
 	var redirectURI = csrfToken.RedirectURI
@@ -459,9 +856,11 @@ func (au *SessionCookieAuthenticator) HandleCallback(cfg OAuthAuthorizationFlowC
 }
 
 func (au *SessionCookieAuthenticator) StripRequest(r *http.Request) {
+	var stripCookieNames = []string{au.sessionCookieName(), au.refreshCookieName()}
+
 	// Read all cookies and only keep any that aren't our session cookie
 	cookies := slices.DeleteFunc(r.Cookies(), func(cookie *http.Cookie) bool {
-		return cookie.Name == au.Name
+		return slices.Contains(stripCookieNames, cookie.Name)
 	})
 
 	// Delete any original Cookie header

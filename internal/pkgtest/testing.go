@@ -3,11 +3,13 @@ package pkgtest
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"golang.org/x/oauth2"
 )
 
 //nolint:gochecknoglobals
@@ -67,19 +69,59 @@ func NewTestVerifier(clock func() time.Time) *oidc.IDTokenVerifier {
 	})
 }
 
+// OAuth2Mock is a mock implementation for testing OAuth2 interactions
+// where functions can override each exported method.
+// If any function is not overridden, the associated method will return an error.
+type OAuth2Mock struct {
+	AuthCodeURLFunc func(ctx context.Context, state string, opts ...oauth2.AuthCodeOption) (string, error)
+	ExchangeFunc    func(ctx context.Context, code string, opts ...oauth2.AuthCodeOption) (*oauth2.Token, error)
+	RefreshFunc     func(ctx context.Context, refreshToken string) (*oauth2.Token, error)
+	UserInfoFunc    func(ctx context.Context, tokenSource oauth2.TokenSource) (*oidc.UserInfo, error)
+}
+
+func (c *OAuth2Mock) AuthCodeURL(ctx context.Context, state string, opts ...oauth2.AuthCodeOption) (string, error) {
+	if c.AuthCodeURLFunc == nil {
+		return "", errors.New("not implemented")
+	}
+
+	return c.AuthCodeURLFunc(ctx, state, opts...)
+}
+
+func (c *OAuth2Mock) Exchange(ctx context.Context, code string, opts ...oauth2.AuthCodeOption) (*oauth2.Token, error) {
+	if c.ExchangeFunc == nil {
+		return nil, errors.New("not implemented")
+	}
+
+	return c.ExchangeFunc(ctx, code, opts...)
+}
+
+func (c *OAuth2Mock) Refresh(ctx context.Context, refreshToken string) (*oauth2.Token, error) {
+	if c.RefreshFunc == nil {
+		return nil, errors.New("not implemented")
+	}
+
+	return c.RefreshFunc(ctx, refreshToken)
+}
+
+func (c *OAuth2Mock) UserInfo(ctx context.Context, tokenSource oauth2.TokenSource) (*oidc.UserInfo, error) {
+	if c.UserInfoFunc == nil {
+		return nil, errors.New("not implemented")
+	}
+
+	return c.UserInfoFunc(ctx, tokenSource)
+}
+
 // TestOIDCConfiguration is a test implementation of OIDCConfiguration.
 type TestOIDCConfiguration struct {
-	clock         func() time.Time
+	OAuth2Mock
+
 	Verifier      *oidc.IDTokenVerifier
+	ClockAdjust   time.Duration
 	UsernameClaim string
 }
 
 func (c *TestOIDCConfiguration) Now() time.Time {
-	if c.clock == nil {
-		return time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
-	}
-
-	return c.clock()
+	return time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC).Add(c.ClockAdjust)
 }
 
 func (c *TestOIDCConfiguration) GetVerifier(_ context.Context) (*oidc.IDTokenVerifier, error) {

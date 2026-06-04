@@ -21,6 +21,7 @@ import (
 type oauth2Client interface {
 	AuthCodeURL(state string, opts ...oauth2.AuthCodeOption) string
 	Exchange(ctx context.Context, code string, opts ...oauth2.AuthCodeOption) (*oauth2.Token, error)
+	Refresh(ctx context.Context, refreshToken string) (*oauth2.Token, error)
 	Scopes() []string
 	ClientID() string
 }
@@ -33,7 +34,7 @@ type oauth2ClientTemplate struct {
 	tokenParams map[string]string
 }
 
-func (c *oauth2ClientTemplate) Exchange(ctx context.Context, code string, opts ...oauth2.AuthCodeOption) (*oauth2.Token, error) {
+func (c *oauth2ClientTemplate) prepare(ctx context.Context) (context.Context, *oauth2.Config, error) {
 	//nolint:forcetypeassert // Caddy will always provide a replacer in the context. A missing replacer will result in a panic.
 	repl := ctx.Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
 
@@ -46,12 +47,22 @@ func (c *oauth2ClientTemplate) Exchange(ctx context.Context, code string, opts .
 
 	cfg.ClientSecret, err = repl.ReplaceOrErr(c.template.ClientSecret, false, true)
 	if err != nil {
-		return nil, fmt.Errorf("failed to replace client secret: %w", err)
+		return ctx, nil, fmt.Errorf("failed to replace client secret: %w", err)
+	}
+
+	return ctx, cfg, nil
+}
+
+func (c *oauth2ClientTemplate) Exchange(ctx context.Context, code string, opts ...oauth2.AuthCodeOption) (*oauth2.Token, error) {
+	ctx, cfg, err := c.prepare(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare oauth2 config: %w", err)
 	}
 
 	if len(c.tokenParams) > 0 {
 		for urlParam, v := range c.tokenParams {
-			pv, err := repl.ReplaceOrErr(v, false, true)
+			//nolint:forcetypeassert // Caddy will always provide a replacer in the context. A missing replacer will result in a panic.
+			pv, err := ctx.Value(caddy.ReplacerCtxKey).(*caddy.Replacer).ReplaceOrErr(v, false, true)
 			if err != nil {
 				return nil, fmt.Errorf("failed to replace token param %s: %w", urlParam, err)
 			}
@@ -61,6 +72,15 @@ func (c *oauth2ClientTemplate) Exchange(ctx context.Context, code string, opts .
 	}
 
 	return cfg.Exchange(ctx, code, opts...)
+}
+
+func (c *oauth2ClientTemplate) Refresh(ctx context.Context, refreshToken string) (*oauth2.Token, error) {
+	ctx, cfg, err := c.prepare(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare oauth2 config: %w", err)
+	}
+
+	return cfg.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken}).Token()
 }
 
 func (c *oauth2ClientTemplate) AuthCodeURL(state string, opts ...oauth2.AuthCodeOption) string {
@@ -85,10 +105,7 @@ type providerDiscoveryConfiguration struct {
 	OAuth2   oauth2Client
 }
 
-var (
-	_ authenticator.OIDCConfiguration                   = (*Provider)(nil)
-	_ authenticator.OAuthAuthorizationFlowConfiguration = (*Provider)(nil)
-)
+var _ authenticator.OIDCConfiguration = (*Provider)(nil)
 
 // Provider holds the built configuration for an OIDC provider and authentication logic.
 type Provider struct {
@@ -129,6 +146,15 @@ func (pr *Provider) Exchange(ctx context.Context, code string, opts ...oauth2.Au
 	}
 
 	return discovery.OAuth2.Exchange(ctx, code, opts...)
+}
+
+func (pr *Provider) Refresh(ctx context.Context, refreshToken string) (*oauth2.Token, error) {
+	discovery, err := pr.Discovery.Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return discovery.OAuth2.Refresh(ctx, refreshToken)
 }
 
 func (pr *Provider) UserInfo(ctx context.Context, tokenSource oauth2.TokenSource) (*oidc.UserInfo, error) {
