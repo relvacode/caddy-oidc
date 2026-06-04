@@ -70,7 +70,7 @@ func (ss SameSite) HTTPSameSite() http.SameSite {
 
 // RefreshSession is the secure cookie JSON payload that stores refresh session information.
 type RefreshSession struct {
-	ID string `json:"id"`
+	ID uuid.UUID `json:"id"`
 	// Secret is the unique refresh session token secret.
 	// This is used to decrypt the refresh token stored in the session storage.
 	Secret []byte `json:"s"`
@@ -347,8 +347,8 @@ func (au *SessionCookieAuthenticator) decodeCookie(r *http.Request, name string,
 	return nil
 }
 
-func (*SessionCookieAuthenticator) storageKeyForID(id string) string {
-	return path.Join("oidc", "sessions", id)
+func (*SessionCookieAuthenticator) storageKeyForID(id uuid.UUID) string {
+	return path.Join("oidc", "sessions", id.String())
 }
 
 // storeRefreshToken generates and stores a new refresh session into the configured storage of this authenticator.
@@ -362,7 +362,7 @@ func (*SessionCookieAuthenticator) storageKeyForID(id string) string {
 // Only the client has the secret needed to decrypt their refresh token.
 func (au *SessionCookieAuthenticator) storeRefreshToken(ctx context.Context, hdr http.Header, refreshToken string) error {
 	var (
-		id     = uuid.New().String()
+		id     = uuid.New()
 		secret = make([]byte, chacha20poly1305.KeySize)
 		nonce  = make([]byte, chacha20poly1305.NonceSizeX)
 	)
@@ -387,7 +387,7 @@ func (au *SessionCookieAuthenticator) storeRefreshToken(ctx context.Context, hdr
 
 	sealed = aead.Seal(sealed, nonce, []byte(refreshToken), nil)
 
-	au.log.Debug("Storing new refresh token in persistent storage", zap.String("session_id", id))
+	au.log.Debug("Storing new refresh token in persistent storage", zap.String("session_id", id.String()))
 
 	err = au.storage.Store(ctx, au.storageKeyForID(id), sealed)
 	if err != nil {
@@ -572,7 +572,7 @@ func (au *SessionCookieAuthenticator) tryRefreshSession(ctx context.Context, cfg
 
 	storagePath := au.storageKeyForID(refreshSession.ID)
 
-	log := au.log.With(zap.String("session_id", refreshSession.ID))
+	log := au.log.With(zap.String("session_id", refreshSession.ID.String()))
 	log.Debug("Trying to refresh session using stored refresh token")
 
 	// Lock the storage for this session.
