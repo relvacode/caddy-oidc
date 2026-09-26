@@ -212,10 +212,47 @@ func TestSessionCookieAuthenticator_AuthenticateRequest_WithCookieSignedByOther(
 
 	_, err = au.AuthenticateRequest(&cfg, r)
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNoAuthentication)
 
 	var he caddyhttp.HandlerError
 	if assert.ErrorAs(t, err, &he) {
-		assert.Equal(t, http.StatusBadRequest, he.StatusCode)
+		assert.Equal(t, http.StatusUnauthorized, he.StatusCode)
+	}
+}
+
+func TestSessionCookieAuthenticator_AuthenticateRequest_CookiePastSecureCookieMaxAge(t *testing.T) {
+	t.Parallel()
+
+	var (
+		cfg pkgtest.TestOIDCConfiguration
+		au  = &SessionCookieAuthenticator{
+			Name:   "test-cookie",
+			Secret: "Y4lbVNr01M4NyBCUSNbrAL4cavA6kjdM",
+		}
+	)
+
+	ctx, cancel := caddy.NewContext(caddy.Context{Context: context.Background()})
+	defer cancel()
+
+	err := au.Provision(ctx)
+	require.NoError(t, err)
+
+	cookieValue, err := au.secure.Encode(au.Name, &session.Session{UID: "test"})
+	require.NoError(t, err)
+
+	// Any timestamp is now past max age
+	au.secure.MaxAge(-1)
+
+	r := pkgtest.NewRequest(http.MethodGet, "/", nil)
+	r.AddCookie(au.NewCookie(cookieValue))
+
+	_, err = au.AuthenticateRequest(&cfg, r)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNoAuthentication)
+
+	var he caddyhttp.HandlerError
+	if assert.ErrorAs(t, err, &he) {
+		assert.Equal(t, http.StatusUnauthorized, he.StatusCode)
 	}
 }
 

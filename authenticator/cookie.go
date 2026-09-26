@@ -343,7 +343,8 @@ func (au *SessionCookieAuthenticator) AuthenticateRequest(cfg OIDCConfiguration,
 
 	err = au.secure.Decode(au.Name, cookiePlain.Value, &s)
 	if err != nil {
-		return nil, caddyhttp.Error(http.StatusBadRequest, err)
+		// Expired or foreign-signed cookie, treat as unauthenticated
+		return nil, caddyhttp.Error(http.StatusUnauthorized, fmt.Errorf("%w: %w", ErrNoAuthentication, err))
 	}
 
 	err = s.ValidateClock(cfg.Now())
