@@ -298,6 +298,10 @@ func (au *SessionCookieAuthenticator) Provision(_ caddy.Context) error {
 	au.secure = securecookie.New(hashKey, blockKey)
 	au.secure.SetSerializer(&securecookie.JSONEncoder{})
 
+	// Do not restrict max age of the cookie at the securecookie level,
+	// as we will validate the session expiration time as part of the session payload.
+	au.secure.MaxAge(0)
+
 	if au.RedirectURL == "" {
 		au.RedirectURL = defaultRedirectURL
 	}
