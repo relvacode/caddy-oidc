@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -32,8 +33,12 @@ const (
 	defaultRedirectURL = "/oauth2/callback"
 )
 
-// ErrNoIDToken is returned when an OAuth2 code exchange response does not contain an ID token.
-var ErrNoIDToken = errors.New("authentication server did not return an ID token")
+var (
+	// ErrNoIDToken is returned when an OAuth2 code exchange response does not contain an ID token.
+	ErrNoIDToken = errors.New("authentication server did not return an ID token")
+	// ErrInvalidRequestURI is returned when the client provides a post-login redirect request URI that is invalid.
+	ErrInvalidRequestURI = errors.New("invalid request URI")
+)
 
 // OAuthAuthorizationFlowConfiguration represents the configuration required
 // to implement an OAuth2 Authorization Code Flow.
@@ -120,6 +125,40 @@ func extractUsernameClaim(claims map[string]json.RawMessage, name string) (strin
 	}
 
 	return uid, nil
+}
+
+func validateCSRFRequestURI(raw string) (string, error) {
+	if strings.ContainsAny(raw, "\\\t\r\n") {
+		return "", errors.New("must not contain any invalid character")
+	}
+
+	uri, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+
+	if uri.Scheme != "" {
+		return "", errors.New("must not contain a URL scheme")
+	}
+
+	if uri.Host != "" {
+		return "", errors.New("must not contain a URL host")
+	}
+
+	if uri.Opaque != "" {
+		return "", errors.New("URI must not be opaque")
+	}
+
+	path := uri.EscapedPath()
+	if !strings.HasPrefix(path, "/") {
+		return "", errors.New("URI must be an absolute path")
+	}
+
+	if strings.HasPrefix(path, "//") {
+		return "", errors.New("URI must not be scheme-relative")
+	}
+
+	return uri.RequestURI(), nil
 }
 
 var (
@@ -394,17 +433,24 @@ func (au *SessionCookieAuthenticator) GetAbsRedirectURI(r *http.Request) *url.UR
 }
 
 // StartLogin starts the authorization flow by setting the state cookie and redirecting to the authorization endpoint.
-// The state cookie is in the format of `<cookie_name>|<state>`, with the value containing the PKCE code verifier.
+// The state cookie is in the format of `<cookie_name>|<state>` with a value containing
+//   - A randomly generated PKCE code verifier
+//   - The current request URI to be redirected to after authorization - validated to ensure it is a path relative to the request URL.
+//
 // The OAuth2 redirect URI is set to the configured redirect URI made absolute relative to the request URL.
 func (au *SessionCookieAuthenticator) StartLogin(cfg OAuthAuthorizationFlowConfiguration, rw http.ResponseWriter, r *http.Request) error {
 	var (
-		state             = uuid.New().String()
-		pkceVerifier      = oauth2.GenerateVerifier()
-		csrfCookieName    = fmt.Sprintf("%s|%s", au.Name, state)
-		csrfCookiePayload = &CSRFToken{PKCEVerifier: pkceVerifier, RedirectURI: r.RequestURI}
+		state          = uuid.New().String()
+		pkceVerifier   = oauth2.GenerateVerifier()
+		csrfCookieName = fmt.Sprintf("%s|%s", au.Name, state)
 	)
 
-	csrfCookieValue, err := au.secure.Encode(csrfCookieName, csrfCookiePayload)
+	requestURI, err := validateCSRFRequestURI(r.RequestURI)
+	if err != nil {
+		return caddyhttp.Error(http.StatusBadRequest, errors.Join(ErrInvalidRequestURI, err))
+	}
+
+	csrfCookieValue, err := au.secure.Encode(csrfCookieName, &CSRFToken{PKCEVerifier: pkceVerifier, RedirectURI: requestURI})
 	if err != nil {
 		return err
 	}
@@ -424,7 +470,6 @@ func (au *SessionCookieAuthenticator) StartLogin(cfg OAuthAuthorizationFlowConfi
 		return err
 	}
 
-	//nolint:gosec
 	http.Redirect(rw, r, authCodeURL, http.StatusFound)
 
 	return nil
@@ -564,6 +609,13 @@ func (au *SessionCookieAuthenticator) HandleCallback(cfg OAuthAuthorizationFlowC
 	var redirectURI = csrfToken.RedirectURI
 	if redirectURI == "" {
 		redirectURI = "/" // Fall back to root
+	}
+
+	// Post-decode validation of the redirect URI.
+	// This is only for defense-in-depth purposes as this validation also happens during creation of the signed CSRF cookie.
+	redirectURI, err = validateCSRFRequestURI(redirectURI)
+	if err != nil {
+		return caddyhttp.Error(http.StatusBadRequest, errors.Join(ErrInvalidRequestURI, err))
 	}
 
 	http.Redirect(rw, r, redirectURI, http.StatusFound)

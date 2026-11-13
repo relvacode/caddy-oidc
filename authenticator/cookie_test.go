@@ -343,6 +343,29 @@ func TestSessionCookieAuthenticator_StripRequest(t *testing.T) {
 	}
 }
 
+type testStartLoginConfiguration struct {
+	pkgtest.TestOIDCConfiguration
+}
+
+func (cfg *testStartLoginConfiguration) AuthCodeURL(_ context.Context, state string, opts ...oauth2.AuthCodeOption) (string, error) {
+	return (&oauth2.Config{
+		ClientID: "test-client",
+		Endpoint: oauth2.Endpoint{
+			AuthURL: "https://idp.example/authorize",
+		},
+	}).AuthCodeURL(state, opts...), nil
+}
+
+func (cfg *testStartLoginConfiguration) Exchange(_ context.Context, _ string, _ ...oauth2.AuthCodeOption) (*oauth2.Token, error) {
+	//nolint:nilnil
+	return nil, nil
+}
+
+func (cfg *testStartLoginConfiguration) UserInfo(_ context.Context, _ oauth2.TokenSource) (*oidc.UserInfo, error) {
+	//nolint:nilnil
+	return nil, nil
+}
+
 type testHandleCallbackConfiguration struct {
 	pkgtest.TestOIDCConfiguration
 
@@ -380,6 +403,130 @@ func newTestUserInfo(t *testing.T, claims string) *oidc.UserInfo {
 		SetBytes([]byte(claims))
 
 	return userInfo
+}
+
+func TestSessionCookieAuthenticator_StartLogin_PostLoginRedirectURI(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		requestURI string
+		expectErr  error
+	}{
+		{
+			name:       "path relative uri",
+			requestURI: "/login",
+			expectErr:  nil,
+		},
+		{
+			name:       "path relative uri with query",
+			requestURI: "/login?next=/dashboard",
+			expectErr:  nil,
+		},
+		{
+			// further redirects made by the upstream are out of scope
+			name:       "path relative with dangerous param",
+			requestURI: "/login?next=//evil.example",
+			expectErr:  nil,
+		},
+		{
+			name:       "*",
+			requestURI: "*",
+			expectErr:  ErrInvalidRequestURI,
+		},
+		{
+			name:       "scheme relative uri",
+			requestURI: "//evil.example",
+			expectErr:  ErrInvalidRequestURI,
+		},
+		{
+			name:       "scheme relative uri with path",
+			requestURI: "//evil.example/path",
+			expectErr:  ErrInvalidRequestURI,
+		},
+		{
+			name:       "scheme relative backslash encoded",
+			requestURI: "/\\evil.example",
+			expectErr:  ErrInvalidRequestURI,
+		},
+		{
+			name:       "scheme relative encoded uri",
+			requestURI: "/%2Fevil.example",
+			expectErr:  nil,
+		},
+		{
+			name:       "absolute HTTP uri",
+			requestURI: "http://evil.example",
+			expectErr:  ErrInvalidRequestURI,
+		},
+		{
+			name:       "absolute HTTPS uri",
+			requestURI: "https://evil.example",
+			expectErr:  ErrInvalidRequestURI,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			au := &SessionCookieAuthenticator{
+				Name:        "test-cookie",
+				Secret:      "Y4lbVNr01M4NyBCUSNbrAL4cavA6kjdM",
+				RedirectURL: "/login",
+			}
+
+			ctx, cancel := caddy.NewContext(caddy.Context{Context: context.Background()})
+			defer cancel()
+
+			err := au.Provision(ctx)
+			require.NoError(t, err)
+
+			r := pkgtest.NewRequest(http.MethodGet, tt.requestURI, nil)
+			w := httptest.NewRecorder()
+
+			err = au.StartLogin(&testStartLoginConfiguration{}, w, r)
+
+			if tt.expectErr == nil {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, tt.expectErr)
+				assert.Empty(t, w.Header().Get("Location"))
+				assert.Empty(t, w.Header().Get("Set-Cookie"))
+
+				return
+			}
+
+			require.Equal(t, http.StatusFound, w.Code)
+
+			authURL, err := url.Parse(w.Header().Get("Location"))
+			require.NoError(t, err)
+
+			csrfCookie, err := http.ParseSetCookie(w.Header().Get("Set-Cookie"))
+			require.NoError(t, err)
+
+			r = pkgtest.NewRequest(http.MethodGet, tt.requestURI, nil)
+			r.AddCookie(csrfCookie)
+			r.Form = url.Values{
+				"state": {authURL.Query().Get("state")},
+			}
+
+			w = httptest.NewRecorder()
+
+			err = au.HandleCallback(&testHandleCallbackConfiguration{
+				TestOIDCConfiguration: pkgtest.TestOIDCConfiguration{
+					Verifier: pkgtest.NewTestVerifier(nil),
+				},
+				expires:  time.Now().Add(time.Hour),
+				userInfo: newTestUserInfo(t, `{"sub": "test-subject"}`),
+			}, w, r)
+
+			require.NoError(t, err)
+
+			assert.Equal(t, http.StatusFound, w.Code)
+			assert.Equal(t, tt.requestURI, w.Header().Get("Location"))
+		})
+	}
 }
 
 func TestSessionCookieAuthenticator_HandleCallback_CopiesClaimsAsRawJSON(t *testing.T) {
