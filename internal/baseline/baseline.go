@@ -8,7 +8,7 @@ import (
 )
 
 func isByReferenceMutable(t reflect.Type) bool {
-	return t.Kind() == reflect.Ptr || t.Kind() == reflect.Interface || t.Kind() == reflect.Map || t.Kind() == reflect.Slice
+	return t.Kind() == reflect.Pointer || t.Kind() == reflect.Interface || t.Kind() == reflect.Map || t.Kind() == reflect.Slice
 }
 
 // Apply applies a baseline to the destination struct.

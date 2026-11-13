@@ -360,6 +360,7 @@ func (au *SessionCookieAuthenticator) AuthenticateRequest(cfg OIDCConfiguration,
 }
 
 func (au *SessionCookieAuthenticator) NewCookie(value string) *http.Cookie {
+	//nolint:gosec // cookie parameters are not client controlled
 	cookie := &http.Cookie{
 		Name:     au.Name,
 		Value:    value,
@@ -408,6 +409,7 @@ func (au *SessionCookieAuthenticator) StartLogin(cfg OAuthAuthorizationFlowConfi
 		return err
 	}
 
+	//nolint:gosec
 	csrfCookie := au.NewCookie(csrfCookieValue)
 	csrfCookie.Name = csrfCookieName
 	csrfCookie.MaxAge = 900 // 15-minute short expiry time for the CSRF cookie
@@ -422,6 +424,7 @@ func (au *SessionCookieAuthenticator) StartLogin(cfg OAuthAuthorizationFlowConfi
 		return err
 	}
 
+	//nolint:gosec
 	http.Redirect(rw, r, authCodeURL, http.StatusFound)
 
 	return nil
@@ -438,6 +441,7 @@ func (au *SessionCookieAuthenticator) handleCallbackParseCSRFCookie(rw http.Resp
 	}
 
 	// Delete CSRF cookie
+	//nolint:gosec
 	deleteCsrfCookie := au.NewCookie("")
 	deleteCsrfCookie.Name = csrfCookieName
 	deleteCsrfCookie.MaxAge = -1
