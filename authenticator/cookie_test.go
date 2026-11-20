@@ -499,6 +499,9 @@ func TestSessionCookieAuthenticator_StartLogin_PostLoginRedirectURI(t *testing.T
 
 			require.Equal(t, http.StatusFound, w.Code)
 
+			// The redirect carries a per-login state cookie, so shared caches must never store it.
+			assert.Contains(t, w.Header().Get("Cache-Control"), "no-store")
+
 			authURL, err := url.Parse(w.Header().Get("Location"))
 			require.NoError(t, err)
 
@@ -525,6 +528,52 @@ func TestSessionCookieAuthenticator_StartLogin_PostLoginRedirectURI(t *testing.T
 
 			assert.Equal(t, http.StatusFound, w.Code)
 			assert.Equal(t, tt.requestURI, w.Header().Get("Location"))
+
+			// The callback response carries the session cookie, so shared caches must never store it.
+			assert.Contains(t, w.Header().Get("Cache-Control"), "no-store")
+		})
+	}
+}
+
+func TestSessionCookieAuthenticator_HandleCallback_ErrorNotCached(t *testing.T) {
+	t.Parallel()
+
+	au := &SessionCookieAuthenticator{
+		Name:   "test-cookie",
+		Secret: "Y4lbVNr01M4NyBCUSNbrAL4cavA6kjdM",
+	}
+
+	ctx, cancel := caddy.NewContext(caddy.Context{Context: context.Background()})
+	t.Cleanup(cancel)
+
+	err := au.Provision(ctx)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name   string
+		target string
+	}{
+		{
+			name:   "error from authorization endpoint",
+			target: "/oauth2/callback?state=test-state&error=access_denied",
+		},
+		{
+			name:   "missing CSRF cookie",
+			target: "/oauth2/callback?state=test-state&code=test-code",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r := pkgtest.NewRequest(http.MethodGet, tt.target, nil)
+			w := httptest.NewRecorder()
+
+			err := au.HandleCallback(&testHandleCallbackConfiguration{}, w, r)
+			require.Error(t, err)
+
+			assert.Contains(t, w.Header().Get("Cache-Control"), "no-store")
 		})
 	}
 }
