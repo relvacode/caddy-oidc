@@ -455,13 +455,6 @@ func (au *SessionCookieAuthenticator) StartLogin(cfg OAuthAuthorizationFlowConfi
 		return err
 	}
 
-	//nolint:gosec
-	csrfCookie := au.NewCookie(csrfCookieValue)
-	csrfCookie.Name = csrfCookieName
-	csrfCookie.MaxAge = 900 // 15-minute short expiry time for the CSRF cookie
-
-	http.SetCookie(rw, csrfCookie)
-
 	authCodeURL, err := cfg.AuthCodeURL(r.Context(), state,
 		oauth2.S256ChallengeOption(pkceVerifier),
 		oauth2.SetAuthURLParam("redirect_uri", au.GetAbsRedirectURI(r).String()),
@@ -469,6 +462,15 @@ func (au *SessionCookieAuthenticator) StartLogin(cfg OAuthAuthorizationFlowConfi
 	if err != nil {
 		return err
 	}
+
+	//nolint:gosec
+	csrfCookie := au.NewCookie(csrfCookieValue)
+	csrfCookie.Name = csrfCookieName
+	csrfCookie.MaxAge = 900 // 15-minute short expiry time for the CSRF cookie
+
+	http.SetCookie(rw, csrfCookie)
+
+	rw.Header().Set("Cache-Control", "private, no-cache, no-store, must-revalidate")
 
 	http.Redirect(rw, r, authCodeURL, http.StatusFound)
 
@@ -584,6 +586,9 @@ func (au *SessionCookieAuthenticator) IsCallbackURL(r *http.Request) bool {
 
 // HandleCallback handles the callback from the authorization endpoint.
 func (au *SessionCookieAuthenticator) HandleCallback(cfg OAuthAuthorizationFlowConfiguration, rw http.ResponseWriter, r *http.Request) error {
+	// Never cache the callback response
+	rw.Header().Set("Cache-Control", "private, no-cache, no-store, must-revalidate")
+
 	if errValue := r.FormValue("error"); errValue != "" {
 		return caddyhttp.Error(http.StatusBadRequest, fmt.Errorf("error: %s, description: %s", errValue, r.FormValue("error_description")))
 	}
